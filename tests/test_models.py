@@ -5,15 +5,27 @@ from datetime import datetime, time, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from ict_trading_agent.candidates import ConceptCandidate, SetupCandidate
-from ict_trading_agent.config import TradingDayPolicy, build_xauusd_intraday_v0
+from ict_trading_agent.candidates import ConceptCandidate, SetupCandidate, TargetCandidate
+from ict_trading_agent.config import (
+    ConceptUsageSpec,
+    SetupRuleSpec,
+    TradingDayPolicy,
+    build_xauusd_intraday_v0,
+)
 from ict_trading_agent.decisions import TradeDecision
 from ict_trading_agent.enums import (
     CandidateType,
     Direction,
     FactType,
+    RuleOperator,
+    RuleSeverity,
+    SemanticAction,
+    SemanticClass,
     Session,
     SetupStatus,
+    TargetScope,
+    TargetSide,
+    TargetType,
     Timeframe,
     TimeframeRole,
     TradeAction,
@@ -22,9 +34,12 @@ from ict_trading_agent.facts import ObservableFact, PriceGeometry
 from ict_trading_agent.lifecycle import assert_setup_transition, can_transition_setup
 from ict_trading_agent.presets import CORE_CONCEPT_SPECS, FVG_SPEC, SWING_POINT_SPEC
 from ict_trading_agent.safety import SafetyAssessment
-from ict_trading_agent.semantics import CandidateAssessment, SemanticAssessment
+from ict_trading_agent.semantics import (
+    CandidateAssessment,
+    SemanticAssessment,
+    SetupSemanticDecision,
+)
 from ict_trading_agent.state import MarketState, TemporalContext, TimeframeState
-from ict_trading_agent.enums import SemanticClass
 
 
 T0 = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
@@ -263,9 +278,27 @@ def test_semantic_scores_are_bounded_without_becoming_probabilities() -> None:
         effective_direction=Direction.BULLISH,
         overall_context_score=0.77,
         model="model-name",
+        model_version="model-version",
         prompt_version="semantic-v0",
+        temperature=0.0,
+        input_state_hash="sha256:state",
+        created_at=T0,
+        knowledge_version="knowledge-v0",
     )
     assert assessment.overall_context_score == 0.77
+    decision = SetupSemanticDecision(
+        setup_candidate_id="setup-1",
+        action=SemanticAction.ACCEPT,
+        context_score=0.77,
+        model="model-name",
+        model_version="model-version",
+        prompt_version="semantic-v0",
+        temperature=0.0,
+        input_state_hash="sha256:state",
+        created_at=T0,
+        knowledge_version="knowledge-v0",
+    )
+    assert decision.input_state_hash == assessment.input_state_hash
     with pytest.raises(ValidationError):
         CandidateAssessment(
             candidate_id="candidate-1",
@@ -290,3 +323,56 @@ def test_passed_safety_cannot_hide_failed_checks() -> None:
         rejection_codes=["SPREAD_TOO_WIDE"],
     )
     assert safety.passed is False
+
+
+def test_session_targets_are_generic_and_require_session_metadata() -> None:
+    target = TargetCandidate(
+        candidate_id="target-asia-high",
+        symbol="XAUUSD",
+        price=3370.2,
+        side=TargetSide.UPSIDE,
+        target_type=TargetType.SESSION_HIGH,
+        scope=TargetScope.SESSION,
+        session=Session.ASIA,
+        available_at=T0,
+    )
+    assert target.session is Session.ASIA
+    with pytest.raises(ValidationError, match="require a concrete session"):
+        TargetCandidate(
+            candidate_id="target-invalid",
+            symbol="XAUUSD",
+            price=3370.2,
+            side=TargetSide.UPSIDE,
+            target_type=TargetType.SESSION_HIGH,
+            scope=TargetScope.SESSION,
+            available_at=T0,
+        )
+    with pytest.raises(ValidationError, match="only valid for session targets"):
+        TargetCandidate(
+            candidate_id="target-invalid-metadata",
+            symbol="XAUUSD",
+            price=3370.2,
+            side=TargetSide.UPSIDE,
+            target_type=TargetType.PREVIOUS_DAY_HIGH,
+            scope=TargetScope.INTRADAY,
+            session=Session.ASIA,
+            available_at=T0,
+        )
+
+
+def test_legacy_rule_scoring_fields_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="scoring_feature"):
+        ConceptUsageSpec(
+            concept_id="imbalance.fvg",
+            timeframe=Timeframe.M15,
+            role=TimeframeRole.SETUP,
+            scoring_feature=True,
+        )
+    with pytest.raises(ValidationError, match="weight"):
+        SetupRuleSpec(
+            id="observable_fvg",
+            description="FVG geometry exists.",
+            severity=RuleSeverity.HARD,
+            operator=RuleOperator.EXISTS,
+            weight=0.2,
+        )

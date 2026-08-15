@@ -97,7 +97,6 @@ class ConceptUsageSpec(SchemaModel):
     enabled: bool = True
     uses: list[NonEmptyStr] = Field(default_factory=list)
     hard_requirement: bool = False
-    scoring_feature: bool = False
     detector_parameters: MetricMap = Field(default_factory=dict)
 
 
@@ -110,7 +109,6 @@ class SetupRuleSpec(SchemaModel):
     operator: RuleOperator
     expected: Any | None = None
     expression: str | None = None
-    weight: float = Field(default=0.0, ge=0.0)
 
     @model_validator(mode="after")
     def validate_custom_expression(self) -> "SetupRuleSpec":
@@ -239,17 +237,12 @@ def build_xauusd_intraday_v0(trading_day: TradingDayPolicy) -> TradingProfile:
         trading_day=trading_day,
         targets=[
             TargetType.LOCAL_SWING,
-            TargetType.ASIA_HIGH,
-            TargetType.ASIA_LOW,
-            TargetType.LONDON_HIGH,
-            TargetType.LONDON_LOW,
-            TargetType.NY_AM_HIGH,
-            TargetType.NY_AM_LOW,
-            TargetType.PDH,
-            TargetType.PDL,
+            TargetType.SESSION_HIGH,
+            TargetType.SESSION_LOW,
+            TargetType.PREVIOUS_DAY_HIGH,
+            TargetType.PREVIOUS_DAY_LOW,
             TargetType.EXTERNAL_LIQUIDITY,
         ],
         decision_core=["liquidity_event", "displacement", "structure_shift"],
         decision_context=["htf_bias", "session", "volatility_regime"],
     )
-

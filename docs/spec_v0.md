@@ -1,0 +1,207 @@
+# ICT Trading Agent — Spec v0
+
+Status: frozen core contracts; implementation policies remain versioned and testable.
+
+Source of design decisions: the planner transcript in
+`chat_web/ICT-LLM-Trading-conversation.md`. Later decisions supersede earlier
+ones when the architecture changed from deterministic concept booleans and
+rule scoring to facts, permissive candidates, LLM semantics, and deterministic
+safety.
+
+## 1. System boundary
+
+```text
+Market Data
+-> ObservableFact
+-> ConceptCandidate
+-> MarketState
+-> SetupCandidate
+-> SemanticAssessment / SetupSemanticDecision [LLM]
+-> SafetyAssessment [deterministic]
+-> TradeDecision
+```
+
+Machine code owns observations, timestamps, geometry, closed-bar semantics,
+candidate generation, lifecycle terminals, risk, sizing, and execution
+constraints. The LLM owns contextual relevance, semantic quality,
+multi-timeframe coherence, structural-reference significance, DOL selection,
+and ACCEPT/REJECT. It cannot rewrite facts or override safety.
+
+## 2. Trading profile v0
+
+- Instrument: XAUUSD.
+- Style: intraday; no overnight holding.
+- Session-aware, not session-filtered.
+- Enabled sessions: Asia, London, NY AM, NY PM.
+- Session is a contextual feature, not a hard entry requirement.
+- Timeframe roles:
+  - W1: macro context.
+  - D1/H4: directional bias.
+  - H1/M15: setup.
+  - M5: entry.
+  - M1: optional refinement.
+- Target universe: local swing, session high/low, previous-day high/low, and
+  external liquidity.
+- Exact trading-day rollover is intentionally unresolved and must be supplied
+  through `TradingDayPolicy`.
+
+## 3. Phase-0 concept universe
+
+Runtime concepts remain logically separate from timeframe occurrence and
+timeframe role.
+
+1. SwingPoint
+2. StructureScope
+3. BOS
+4. CHoCH
+5. MSS
+6. LiquidityPool
+7. LiquiditySweep
+8. ExternalRangeLiquidity
+9. DrawOnLiquidity
+10. ReferenceLiquidity
+11. DealingRange
+12. PremiumDiscount
+13. Displacement
+14. DisplacementStrength
+15. FairValueGap
+16. FVGLifecycle
+17. SessionContext
+18. AsianRange
+
+The first vertical slice only implements the primitive chain needed to produce
+a reproducible setup candidate. OB, IFVG, BPR, OTE, SMT, Silver Bullet, PO3,
+Judas, macros, and other deferred concepts are out of scope.
+
+## 4. Point-in-time invariants
+
+1. Every datetime is timezone-aware.
+2. `occurred_at <= confirmed_at <= available_at` when confirmation exists.
+3. A state may only expose facts/candidates where `available_at <= as_of`.
+4. Multi-timeframe detectors consume closed bars only.
+5. Higher-timeframe developing candles are not silently treated as closed.
+6. Swing/FVG occurrence may belong to an earlier candle, but visibility begins
+   only after the confirming right-side candle closes.
+7. Historical objects are append-only; future lifecycle observations do not
+   mutate what a past replay could see.
+8. Concept definitions are separate from detector implementations and
+   provenance.
+
+## 5. Primitive semantics
+
+### SwingPoint
+
+Canonical three-bar wick geometry after tick normalization:
+
+```text
+Swing high: H[n] > H[n-1] and H[n] > H[n+1]
+Swing low:  L[n] < L[n-1] and L[n] < L[n+1]
+```
+
+`occurred_at` belongs to `n`; confirmation/availability begins at close of
+`n+1`. STH -> ITH -> LTH promotions are later append-only observations.
+
+### Liquidity
+
+A confirmed swing/session/previous-day extreme can create a reference pool.
+Pool taken is a breach; a canonical same-bar sweep additionally requires close
+reclaim. Multi-bar raid/reclaim remains an experimental candidate detector.
+
+### Displacement
+
+Store raw features before semantic classification: body/range,
+body-vs-baseline, opposing wick/range, ATR-normalized range, and close location.
+The initial operational thresholds are research parameters, not universal ICT
+truth. Follow-through is later evidence and cannot be backfilled into the
+original state.
+
+### FVG
+
+Canonical wick geometry:
+
+```text
+Bullish: L[n+1] > H[n-1]
+Bearish: H[n+1] < L[n-1]
+```
+
+FVG geometry is deterministic and independent of displacement. The LLM may
+assess relevance/quality, not existence. Lifecycle observations include touch,
+penetration, CE reach, full fill, and favorable reaction close.
+
+### Structure and MSS
+
+A structure-break fact is close through a confirmed reference swing. BOS,
+CHoCH, internal/external significance, and relevant-reference selection are
+candidate/semantic concerns when ambiguous. MSS relates CHoCH, matching
+displacement, and a causally linked FVG without double-counting them as four
+independent score components.
+
+## 6. Setup lifecycle
+
+TradingView ICT-2022/Silver-Bullet implementations are reference state
+machines, not authoritative truth. The permissive sequence is:
+
+```text
+IDLE
+-> RAID_DETECTED
+-> SHIFT_DETECTED
+-> ENTRY_ZONE_AVAILABLE
+-> READY_FOR_LLM
+```
+
+Mapping to active v0 statuses:
+
+```text
+possible liquidity raid                         -> DETECTED
+raid + possible structural/delivery transition -> FORMING
+shift + linked FVG + retrace/reaction evidence -> READY_FOR_LLM
+LLM                                             -> ACCEPTED | REJECTED
+safety                                          -> ENTERED | RISK_REJECTED
+position completion                             -> CLOSED
+```
+
+Reference implementations suggest invalidating/discarding when structure is
+reclaimed, the target is hit before entry, the entry-zone/FVG opportunity
+fails, or the setup times out. Exact close-acceptance and expiry parameters
+remain configurable.
+
+An FVG reaction candidate should expose at least:
+
+```text
+touched
+penetration_fraction
+favorable_close_outside
+```
+
+## 7. LLM audit contract
+
+Every semantic output records model, optional model version, prompt version,
+optional temperature, input-state hash, creation timestamp, and optional
+knowledge version. Scores are ordinal/self-assessment values, never win
+probabilities.
+
+## 8. Safety contract
+
+Deterministic checks own data freshness, spread, entry/stop validity, RR, daily
+loss, exposure, position limits, trading-day validity, sizing, and execution.
+No LLM output can override a failed safety check.
+
+## 9. Reference-source roles
+
+- ICT Knowledge Library: ontology and definitions.
+- smart-money-concepts: primitive/reference detector implementations; outputs
+  must be re-timestamped for point-in-time availability.
+- TradingView Sweep -> MSS -> FVG implementations: setup sequencing,
+  lifecycle, invalidation, reference selection, and FVG reaction semantics.
+- smc_quant: small stateful strategy/backtest reference only.
+- BAKOME/MT5 EAs: execution and operational risk patterns only; do not trust
+  README signal claims without auditing the actual path.
+
+## 10. Remaining open policies
+
+- XAUUSD trading-day boundary for the selected data source/broker.
+- Structural-reference policy and semantic candidate window.
+- Close-acceptance invalidation formula.
+- Exact session windows and overlap policy.
+- Multi-bar sweep limits and MSS temporal matching window.
+

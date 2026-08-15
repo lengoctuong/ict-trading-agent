@@ -138,14 +138,10 @@ class TargetSide(str, Enum):
 
 class TargetType(str, Enum):
     LOCAL_SWING = "local_swing"
-    ASIA_HIGH = "asia_high"
-    ASIA_LOW = "asia_low"
-    LONDON_HIGH = "london_high"
-    LONDON_LOW = "london_low"
-    NY_AM_HIGH = "ny_am_high"
-    NY_AM_LOW = "ny_am_low"
-    PDH = "pdh"
-    PDL = "pdl"
+    SESSION_HIGH = "session_high"
+    SESSION_LOW = "session_low"
+    PREVIOUS_DAY_HIGH = "previous_day_high"
+    PREVIOUS_DAY_LOW = "previous_day_low"
     EXTERNAL_LIQUIDITY = "external_liquidity"
 
 
@@ -227,4 +223,3 @@ class FvgLifecycle(str, Enum):
     TOUCHED = "touched"
     CE_REACHED = "ce_reached"
     FULLY_FILLED = "fully_filled"
-

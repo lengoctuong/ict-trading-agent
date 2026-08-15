@@ -28,7 +28,12 @@ class SemanticAssessment(SchemaModel):
     reason_codes: list[NonEmptyStr] = Field(default_factory=list)
     reasoning_summary: list[NonEmptyStr] = Field(default_factory=list)
     model: NonEmptyStr
+    model_version: NonEmptyStr | None = None
     prompt_version: NonEmptyStr
+    temperature: float | None = Field(default=None, ge=0.0)
+    input_state_hash: NonEmptyStr
+    created_at: AwareDatetime
+    knowledge_version: NonEmptyStr | None = None
 
 
 class SetupSemanticDecision(SchemaModel):
@@ -41,5 +46,9 @@ class SetupSemanticDecision(SchemaModel):
     reason_codes: list[NonEmptyStr] = Field(default_factory=list)
     reasoning_summary: list[NonEmptyStr] = Field(default_factory=list)
     model: NonEmptyStr
+    model_version: NonEmptyStr | None = None
     prompt_version: NonEmptyStr
-
+    temperature: float | None = Field(default=None, ge=0.0)
+    input_state_hash: NonEmptyStr
+    created_at: AwareDatetime
+    knowledge_version: NonEmptyStr | None = None

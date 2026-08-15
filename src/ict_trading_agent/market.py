@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import timedelta
+
+from pydantic import AwareDatetime, Field, model_validator
+
+from .base import NonEmptyStr, SchemaModel
+from .enums import Timeframe
+
+
+TIMEFRAME_DURATIONS: dict[Timeframe, timedelta] = {
+    Timeframe.W1: timedelta(days=7),
+    Timeframe.D1: timedelta(days=1),
+    Timeframe.H4: timedelta(hours=4),
+    Timeframe.H1: timedelta(hours=1),
+    Timeframe.M15: timedelta(minutes=15),
+    Timeframe.M5: timedelta(minutes=5),
+    Timeframe.M1: timedelta(minutes=1),
+}
+
+
+class OHLCBar(SchemaModel):
+    symbol: NonEmptyStr
+    timeframe: Timeframe
+    open_time: AwareDatetime
+    close_time: AwareDatetime
+    open: float = Field(gt=0.0)
+    high: float = Field(gt=0.0)
+    low: float = Field(gt=0.0)
+    close: float = Field(gt=0.0)
+    volume: float | None = Field(default=None, ge=0.0)
+    tick_volume: int | None = Field(default=None, ge=0)
+    is_closed: bool = True
+
+    @model_validator(mode="after")
+    def validate_bar(self) -> "OHLCBar":
+        if self.close_time <= self.open_time:
+            raise ValueError("close_time must be after open_time")
+        if self.high < max(self.open, self.close):
+            raise ValueError("high cannot be below open/close")
+        if self.low > min(self.open, self.close):
+            raise ValueError("low cannot be above open/close")
+        if self.low > self.high:
+            raise ValueError("low cannot exceed high")
+        return self
+
+    @property
+    def duration(self) -> timedelta:
+        return self.close_time - self.open_time
+
+
+def bars_are_contiguous(left: OHLCBar, right: OHLCBar) -> bool:
+    return (
+        left.symbol == right.symbol
+        and left.timeframe == right.timeframe
+        and left.close_time == right.open_time
+    )
+
+
+class ClosedBarFeed:
+    """Append-only multi-timeframe feed that never exposes developing bars."""
+
+    def __init__(self, symbol: str) -> None:
+        if not symbol.strip():
+            raise ValueError("symbol cannot be empty")
+        self.symbol = symbol.strip()
+        self._bars: dict[Timeframe, list[OHLCBar]] = defaultdict(list)
+        self._keys: set[tuple[Timeframe, object]] = set()
+
+    def append(self, bar: OHLCBar, *, observed_at: AwareDatetime) -> None:
+        if bar.symbol != self.symbol:
+            raise ValueError("bar symbol does not match feed symbol")
+        if not bar.is_closed:
+            raise ValueError("closed-bar feed rejects developing bars")
+        if bar.close_time > observed_at:
+            raise ValueError("bar cannot be observed before close_time")
+        key = (bar.timeframe, bar.open_time)
+        if key in self._keys:
+            raise ValueError("duplicate bar for timeframe/open_time")
+        existing = self._bars[bar.timeframe]
+        if existing and bar.open_time < existing[-1].close_time:
+            raise ValueError("bars cannot overlap or be appended out of order")
+        existing.append(bar)
+        self._keys.add(key)
+
+    def bars(
+        self,
+        timeframe: Timeframe,
+        *,
+        as_of: AwareDatetime | None = None,
+    ) -> tuple[OHLCBar, ...]:
+        bars = self._bars.get(timeframe, [])
+        if as_of is None:
+            return tuple(bars)
+        return tuple(bar for bar in bars if bar.close_time <= as_of)
+
+    def latest(
+        self,
+        timeframe: Timeframe,
+        *,
+        as_of: AwareDatetime,
+    ) -> OHLCBar | None:
+        visible = self.bars(timeframe, as_of=as_of)
+        return visible[-1] if visible else None

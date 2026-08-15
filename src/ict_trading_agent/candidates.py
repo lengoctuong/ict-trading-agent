@@ -9,6 +9,7 @@ from .enums import (
     CandidateType,
     Direction,
     SetupStatus,
+    Session,
     TargetScope,
     TargetSide,
     TargetType,
@@ -45,11 +46,24 @@ class TargetCandidate(SchemaModel):
     side: TargetSide
     target_type: TargetType
     scope: TargetScope
+    session: Session | None = None
     source_timeframe: Timeframe | None = None
     source_fact_ids: list[NonEmptyStr] = Field(default_factory=list)
     available_at: AwareDatetime
     already_taken: bool = False
     metrics: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_session_target(self) -> "TargetCandidate":
+        is_session_target = self.target_type in {
+            TargetType.SESSION_HIGH,
+            TargetType.SESSION_LOW,
+        }
+        if is_session_target and self.session in {None, Session.OFF_SESSION}:
+            raise ValueError("session high/low targets require a concrete session")
+        if not is_session_target and self.session is not None:
+            raise ValueError("session metadata is only valid for session targets")
+        return self
 
 
 class SetupCandidate(SchemaModel):
@@ -79,4 +93,3 @@ class SetupCandidate(SchemaModel):
         if self.expires_at is not None and self.expires_at <= self.available_at:
             raise ValueError("expires_at must be after available_at")
         return self
-
