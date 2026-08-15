@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ict-trading-agent"
+version = "0.1.0"
+description = "Point-in-time-safe Pydantic contracts for the ICT trading agent v0."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.12,<3",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.4,<10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ict_trading_agent"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
