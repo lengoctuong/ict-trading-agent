@@ -19,6 +19,7 @@ from .decisions import TradeDecision
 from .enums import *
 from .facts import ObservableFact, PriceGeometry
 from .market import ClosedBarFeed, OHLCBar, bars_are_contiguous
+from .pipeline import M2DetectionBatch, M2PrimitivePipeline
 from .lifecycle import (
     ALLOWED_SETUP_TRANSITIONS,
     assert_setup_transition,
@@ -54,6 +55,8 @@ __all__ = [
     "KnowledgeReference",
     "MarketState",
     "MarketStateReducer",
+    "M2DetectionBatch",
+    "M2PrimitivePipeline",
     "OHLCBar",
     "ObservableFact",
     "ParameterSpec",

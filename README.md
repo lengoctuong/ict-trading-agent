@@ -28,10 +28,15 @@ facts, timestamps, geometry, position sizing, or risk checks.
 - Closed-bar multi-timeframe feed and configurable IANA-timezone sessions.
 - Strict three-bar swing and FVG geometry detectors with causal availability.
 - Completed-session and previous-day reference-level fact builders.
+- Causal candle features and configurable displacement candidates.
+- Strict level breach/reclaim facts, same-bar liquidity-raid candidates, and
+  unclassified close-through-swing structure candidates.
+- An M2 closed-bar pipeline with stable IDs and append-only batch preflight.
 
 The frozen design contract is in `docs/spec_v0.md`; implementation milestones
-are in `docs/implementation_plan.md`. The complete 74-message source snapshot
-is retained in `chat_web/ICT-LLM-Trading-conversation.md`.
+are in `docs/implementation_plan.md`, and pinned research provenance is in
+`docs/source_registry.md`. The complete 74-message source snapshot is retained
+in `chat_web/ICT-LLM-Trading-conversation.md`.
 
 ## Intentionally unresolved policies
 

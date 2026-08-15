@@ -193,9 +193,10 @@ No LLM output can override a failed safety check.
   must be re-timestamped for point-in-time availability.
 - TradingView Sweep -> MSS -> FVG implementations: setup sequencing,
   lifecycle, invalidation, reference selection, and FVG reaction semantics.
-- smc_quant: small stateful strategy/backtest reference only.
-- BAKOME/MT5 EAs: execution and operational risk patterns only; do not trust
-  README signal claims without auditing the actual path.
+
+`smc_quant`, BAKOME, and other previously discussed repositories are not active
+v0 sources. Adding another source later requires an explicit source-registry
+decision and a bounded role.
 
 ## 10. Remaining open policies
 
@@ -204,4 +205,6 @@ No LLM output can override a failed safety check.
 - Close-acceptance invalidation formula.
 - Exact session windows and overlap policy.
 - Multi-bar sweep limits and MSS temporal matching window.
-
+- Per-timeframe/session displacement baseline and threshold calibration.
+- Reference-level lifecycle after a level is breached, reclaimed, or taken.
+- Equality/tolerance semantics for closes exactly on a reference level.

@@ -17,13 +17,20 @@
 
 ## M2 — Primitive pipeline
 
+Status: implemented and covered by causal synthetic fixtures.
+
 - ThreeBarSwingDetector.
 - Session and previous-day reference facts.
 - FVGGeometryDetector.
 - Candle/displacement raw features.
 - Broad structure-break and liquidity-raid candidates.
+- Pinned source registry and explicit adaptation decisions.
+- Closed-bar pipeline that performs duplicate preflight before append-only batch
+  writes.
 
 ## M3 — Setup state machine
+
+Status: next milestone; transition policies remain subject to the open questions.
 
 ```text
 IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
@@ -49,4 +56,3 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 
 - Deterministic gates, sizing, paper orders, and audit logs.
 - No direct LLM-to-execution path.
-

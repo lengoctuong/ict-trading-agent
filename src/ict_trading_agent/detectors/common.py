@@ -25,3 +25,7 @@ def stable_fact_id(*parts: object) -> str:
     raw = "|".join(str(part) for part in parts)
     return "fact-" + sha256(raw.encode("utf-8")).hexdigest()[:24]
 
+
+def stable_candidate_id(*parts: object) -> str:
+    raw = "|".join(str(part) for part in parts)
+    return "candidate-" + sha256(raw.encode("utf-8")).hexdigest()[:24]
