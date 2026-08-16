@@ -73,9 +73,27 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 
 ## M4 — Replay/backtest harness
 
-- Historical XAUUSD M5/M15/H1/H4 input.
-- Exact replay at `as_of` without look-ahead.
-- Deterministic snapshots and regression fixtures.
+Status: M4.1 implemented; awaiting real Exness exports and review before M4.2
+parameter sensitivity, chart sampling, and outcome labels.
+
+- Native Exness/MT5 CSV/TSV ingestion for XAUUSD with explicit UTC timestamps,
+  source spread preservation, and configurable abnormal-spread threshold.
+- Strict duplicate, order, OHLC, timeframe, and unexplained-gap validation;
+  known weekend/maintenance gaps require an explicit closure calendar.
+- Close-time event scheduler with lower-TF-first ordering at equal timestamps.
+- Exact point-in-time replay through the production M2 and M3 paths; bars are
+  appended only when their close becomes observable.
+- Append-only bar/fact/candidate/raid/setup/transition/READY audit events with
+  raw payloads and causal timestamps.
+- Separate near-miss records for late reclaim/shift/FVG/reaction observations
+  and expired setups, including distance, threshold, and excess when known.
+- JSONL event, near-miss, and replay-step exports plus summary and data-quality
+  JSON reports.
+- Basic detection counts for raids, reclaim type, shifts, FVG lifecycle,
+  reactions, READY, invalidated/expired setups, TFs, and reason codes.
+
+M4.2 remains pending: real-data parameter sensitivity, annotated chart review,
+future MFE/MAE and DOL outcome labeling, and reviewed real-XAU regressions.
 
 ## M5 — Semantic evaluator
 
