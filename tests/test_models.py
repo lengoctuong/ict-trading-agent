@@ -14,6 +14,7 @@ from ict_trading_agent.config import (
     ConceptUsageSpec,
     SetupRuleSpec,
     TradingDayPolicy,
+    build_exness_xauusd_intraday_v0,
     build_xauusd_intraday_v0,
 )
 from ict_trading_agent.decisions import TradeDecision
@@ -107,7 +108,9 @@ def test_fact_rejects_naive_datetimes_and_lookahead() -> None:
     with pytest.raises(ValidationError):
         make_fact(available_at=datetime(2026, 8, 15, 10, 0))
 
-    with pytest.raises(ValidationError, match="available_at cannot precede confirmed_at"):
+    with pytest.raises(
+        ValidationError, match="available_at cannot precede confirmed_at"
+    ):
         ObservableFact(
             fact_id="fact-1",
             fact_type=FactType.SWING_POINT,
@@ -259,10 +262,18 @@ def test_xauusd_profile_preserves_frozen_roles_and_sessions() -> None:
     assert profile.session_policy.contextual_feature is True
 
 
+def test_exness_m3_profile_uses_utc_candle_day() -> None:
+    profile = build_exness_xauusd_intraday_v0()
+    assert profile.trading_day.timezone == "UTC"
+    assert profile.trading_day.rollover_local_time == time(0, 0)
+
+
 def test_core_concept_specs_capture_point_in_time_rules() -> None:
     assert len(CORE_CONCEPT_SPECS) == 7
     assert SWING_POINT_SPEC.formalization.value == "exact"
-    assert all(criterion.requires_future_data for criterion in SWING_POINT_SPEC.criteria)
+    assert all(
+        criterion.requires_future_data for criterion in SWING_POINT_SPEC.criteria
+    )
     assert FVG_SPEC.criteria[0].expression == "L[n+1] > H[n-1]"
     assert FVG_SPEC.confirmed_at_semantics.startswith("Close of candle n+1")
 

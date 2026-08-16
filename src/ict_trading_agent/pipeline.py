@@ -27,6 +27,8 @@ from .reference_lifecycle import (
     ReferenceLifecycleTracker,
 )
 from .stores import CandidateStore, DuplicateRecordError, FactStore
+from .structure_lifecycle import StructureLifecycleTracker
+from .swing_hierarchy import SwingHierarchyPromoter
 
 
 class M2DetectionBatch(SchemaModel):
@@ -73,9 +75,9 @@ class M2PrimitivePipeline:
         self.liquidity_raids = LiquidityRaidCandidateDetector()
         self.price_breaks = PriceBreakDetector(tick_size=tick_size)
         self.structure_breaks = StructureBreakCandidateDetector()
-        self.reference_lifecycle = ReferenceLifecycleTracker(
-            reference_lifecycle_policy
-        )
+        self.reference_lifecycle = ReferenceLifecycleTracker(reference_lifecycle_policy)
+        self.structure_lifecycle = StructureLifecycleTracker()
+        self.swing_hierarchy = SwingHierarchyPromoter()
 
     def process_latest(
         self,
@@ -159,6 +161,7 @@ class M2PrimitivePipeline:
             as_of=bar.open_time,
             symbol=bar.symbol,
         )
+        facts.extend(self.swing_hierarchy.detect([*visible_at_open, *facts]))
         reference_facts = [
             fact
             for fact in visible_at_open
@@ -171,30 +174,48 @@ class M2PrimitivePipeline:
         ]
         for reference_fact in reference_facts:
             reference = ReferenceLevel.from_fact(reference_fact)
-            if not self.reference_lifecycle.is_eligible(
+            liquidity_eligible = self.reference_lifecycle.is_eligible(
                 reference.reference_fact_id,
                 visible_at_open,
                 as_of=bar.open_time,
-            ):
-                continue
-            interactions = self.level_interactions.detect(bar, reference)
-            facts.extend(interactions)
-            if interactions:
-                facts.append(
-                    self.reference_lifecycle.taken_observation(
-                        reference,
-                        interactions[0],
+                detection_timeframe=bar.timeframe,
+            )
+            if liquidity_eligible:
+                interactions = self.level_interactions.detect(bar, reference)
+                facts.extend(interactions)
+                if interactions:
+                    facts.append(
+                        self.reference_lifecycle.taken_observation(
+                            reference,
+                            interactions[0],
+                        )
                     )
+                if len(interactions) == 2:
+                    candidates.append(
+                        self.liquidity_raids.detect(
+                            interactions[0],
+                            interactions[1],
+                        )
+                    )
+            if (
+                reference.fact_type == FactType.SWING_POINT
+                and self.structure_lifecycle.is_eligible(
+                    reference.reference_fact_id,
+                    visible_at_open,
+                    as_of=bar.open_time,
                 )
-            if len(interactions) == 2:
-                candidates.append(
-                    self.liquidity_raids.detect(interactions[0], interactions[1])
-                )
-            if reference.fact_type == FactType.SWING_POINT:
+            ):
                 price_break = self.price_breaks.detect(bar, reference)
                 if price_break is not None:
                     facts.append(price_break)
                     candidates.append(self.structure_breaks.detect(price_break))
+                    if price_break.metrics["same_timeframe_structure_eligible"]:
+                        facts.append(
+                            self.structure_lifecycle.broken_observation(
+                                reference_fact,
+                                price_break,
+                            )
+                        )
 
         self._preflight_append(facts, candidates)
         self.fact_store.extend(facts)

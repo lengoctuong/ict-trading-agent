@@ -98,9 +98,9 @@ def baseline_and_displacement() -> tuple[list[OHLCBar], OHLCBar]:
 
 def test_candle_features_and_displacement_use_prior_closed_baseline_only() -> None:
     baseline, target = baseline_and_displacement()
-    feature = CandleFeatureDetector(
-        CandleFeatureConfig(baseline_period=3)
-    ).detect(target, baseline)
+    feature = CandleFeatureDetector(CandleFeatureConfig(baseline_period=3)).detect(
+        target, baseline
+    )
     assert feature.fact_type is FactType.CANDLE_FEATURES
     assert feature.occurred_at == target.open_time
     assert feature.available_at == target.close_time
@@ -144,9 +144,9 @@ def test_displacement_candidate_preserves_near_threshold_evidence() -> None:
             "close": 104.9,
         }
     )
-    feature = CandleFeatureDetector(
-        CandleFeatureConfig(baseline_period=3)
-    ).detect(near_threshold, baseline)
+    feature = CandleFeatureDetector(CandleFeatureConfig(baseline_period=3)).detect(
+        near_threshold, baseline
+    )
     assert feature.metrics["body_to_range"] == pytest.approx(0.68)
     candidate = DisplacementCandidateDetector().detect(feature)
     assert candidate is not None
@@ -174,9 +174,7 @@ def test_candle_feature_detector_rejects_gapped_or_developing_history() -> None:
 
 
 def test_same_bar_breach_and_reclaim_emit_bearish_raid_candidate() -> None:
-    reference = ReferenceLevel.from_fact(
-        swing_reference(side="high", price=105.0)
-    )
+    reference = ReferenceLevel.from_fact(swing_reference(side="high", price=105.0))
     sweep_bar = bar(3, open_=104.0, high=106.0, low=103.5, close=104.5)
     interactions = LevelInteractionDetector(tick_size=0.1).detect(
         sweep_bar,
@@ -195,9 +193,7 @@ def test_same_bar_breach_and_reclaim_emit_bearish_raid_candidate() -> None:
     touching = sweep_bar.model_copy(update={"high": 105.0})
     assert LevelInteractionDetector(tick_size=0.1).detect(touching, reference) == ()
 
-    sell_side = ReferenceLevel.from_fact(
-        swing_reference(side="low", price=100.0)
-    )
+    sell_side = ReferenceLevel.from_fact(swing_reference(side="low", price=100.0))
     sell_side_sweep = bar(
         3,
         open_=100.5,
@@ -227,9 +223,7 @@ def test_reference_must_exist_before_the_interacting_bar_opens() -> None:
 
 
 def test_close_through_confirmed_swing_is_unclassified_structure_candidate() -> None:
-    reference = ReferenceLevel.from_fact(
-        swing_reference(side="high", price=105.0)
-    )
+    reference = ReferenceLevel.from_fact(swing_reference(side="high", price=105.0))
     break_bar = bar(3, open_=104.0, high=107.0, low=103.5, close=106.0)
     price_break = PriceBreakDetector(tick_size=0.1).detect(break_bar, reference)
     assert price_break is not None
@@ -271,8 +265,7 @@ def test_m2_pipeline_appends_only_outputs_available_at_closed_bar() -> None:
     )
     assert all(fact.available_at <= bars[-1].close_time for fact in batch.facts)
     assert all(
-        candidate.available_at <= bars[-1].close_time
-        for candidate in batch.candidates
+        candidate.available_at <= bars[-1].close_time for candidate in batch.candidates
     )
     raids = [
         candidate
@@ -388,9 +381,56 @@ def test_reference_lifecycle_prevents_repeated_raids_by_default() -> None:
             ny_time=bars[-1].close_time,
         ),
     )
-    assert reference.fact_id not in state.timeframes[
-        Timeframe.M5
-    ].active_swing_fact_ids
+    # Liquidity consumption no longer erases the swing's structural role.
+    assert reference.fact_id in state.timeframes[Timeframe.M5].active_swing_fact_ids
+
+
+def test_liquidity_taken_swing_can_later_break_structurally() -> None:
+    feed = ClosedBarFeed("XAUUSD")
+    bars = [
+        bar(0, open_=100.0, high=101.0, low=99.0, close=100.0),
+        bar(1, open_=100.0, high=101.0, low=99.5, close=100.5),
+        bar(2, open_=100.5, high=101.5, low=100.0, close=101.0),
+        bar(3, open_=104.0, high=106.0, low=103.5, close=104.5),
+        bar(4, open_=104.5, high=107.0, low=104.0, close=106.0),
+    ]
+    for item in bars:
+        feed.append(item, observed_at=item.close_time)
+    reference = swing_reference(side="high", price=105.0, fact_id="dual-role")
+    facts = FactStore()
+    facts.append(reference)
+    candidates = CandidateStore()
+    pipeline = M2PrimitivePipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        tick_size=0.1,
+        candle_config=CandleFeatureConfig(baseline_period=3),
+    )
+    pipeline.process_range(
+        timeframe=Timeframe.M5,
+        start_after=None,
+        as_of=bars[-1].close_time,
+    )
+    lifecycle = facts.visible(as_of=bars[-1].close_time)
+    assert any(
+        fact.fact_type == FactType.REFERENCE_STATE
+        and fact.metrics.get("reference_fact_id") == reference.fact_id
+        for fact in lifecycle
+    )
+    assert any(
+        fact.fact_type == FactType.STRUCTURE_STATE
+        and fact.metrics.get("reference_fact_id") == reference.fact_id
+        for fact in lifecycle
+    )
+    breaks = [
+        candidate
+        for candidate in candidates.visible(as_of=bars[-1].close_time)
+        if candidate.candidate_type == CandidateType.STRUCTURE_BREAK
+        and candidate.raw_features.get("reference_fact_id") == reference.fact_id
+    ]
+    assert len(breaks) == 1
+    assert breaks[0].raw_features["same_timeframe_structure_eligible"] is True
 
 
 def test_reference_reuse_requires_explicit_policy() -> None:
@@ -404,20 +444,35 @@ def test_reference_reuse_requires_explicit_policy() -> None:
     default_tracker = ReferenceLifecycleTracker()
     taken = default_tracker.taken_observation(reference, breach)
     history = [reference_fact, breach, taken]
-    assert default_tracker.is_eligible(
-        reference.reference_fact_id,
-        history,
-        as_of=interacting_bar.close_time,
-    ) is False
+    assert (
+        default_tracker.is_eligible(
+            reference.reference_fact_id,
+            history,
+            as_of=interacting_bar.close_time,
+        )
+        is False
+    )
+    assert (
+        default_tracker.is_eligible(
+            reference.reference_fact_id,
+            history,
+            as_of=interacting_bar.close_time,
+            detection_timeframe=Timeframe.M15,
+        )
+        is True
+    )
 
     reuse_tracker = ReferenceLifecycleTracker(
         ReferenceLifecyclePolicy(reuse_taken_levels=True)
     )
-    assert reuse_tracker.is_eligible(
-        reference.reference_fact_id,
-        history,
-        as_of=interacting_bar.close_time,
-    ) is True
+    assert (
+        reuse_tracker.is_eligible(
+            reference.reference_fact_id,
+            history,
+            as_of=interacting_bar.close_time,
+        )
+        is True
+    )
 
 
 def test_catch_up_processes_every_unseen_bar_once() -> None:
@@ -455,13 +510,14 @@ def test_catch_up_processes_every_unseen_bar_once() -> None:
         timeframe=Timeframe.M5,
         as_of=bars[5].close_time,
     )
-    assert [batch.processed_bar_open_at for batch in resumed] == [
-        bars[5].open_time
-    ]
-    assert pipeline.catch_up(
-        timeframe=Timeframe.M5,
-        as_of=bars[5].close_time,
-    ) == ()
+    assert [batch.processed_bar_open_at for batch in resumed] == [bars[5].open_time]
+    assert (
+        pipeline.catch_up(
+            timeframe=Timeframe.M5,
+            as_of=bars[5].close_time,
+        )
+        == ()
+    )
 
     sequential = M2PrimitivePipeline(
         bar_feed=feed,

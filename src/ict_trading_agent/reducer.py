@@ -7,12 +7,10 @@ from pydantic import AwareDatetime
 from .config import TradingProfile
 from .enums import CandidateType, FactType
 from .market import ClosedBarFeed
-from .reference_lifecycle import (
-    ReferenceLifecyclePolicy,
-    ReferenceLifecycleTracker,
-)
+from .reference_lifecycle import ReferenceLifecyclePolicy
 from .state import MarketState, TemporalContext, TimeframeState
 from .stores import CandidateStore, FactStore
+from .structure_lifecycle import StructureLifecycleTracker
 
 
 class MarketStateReducer:
@@ -31,9 +29,10 @@ class MarketStateReducer:
         self.bar_feed = bar_feed
         self.fact_store = fact_store
         self.candidate_store = candidate_store
-        self.reference_lifecycle = ReferenceLifecycleTracker(
-            reference_lifecycle_policy
-        )
+        # Kept in the constructor for compatibility; liquidity reuse no longer
+        # controls whether a swing remains structurally active.
+        self.reference_lifecycle_policy = reference_lifecycle_policy
+        self.structure_lifecycle = StructureLifecycleTracker()
 
     def reduce(
         self,
@@ -54,7 +53,9 @@ class MarketStateReducer:
                 continue
             tf_facts = [fact for fact in facts if fact.timeframe == timeframe]
             tf_candidates = [
-                candidate for candidate in candidates if candidate.timeframe == timeframe
+                candidate
+                for candidate in candidates
+                if candidate.timeframe == timeframe
             ]
             timeframes[timeframe] = TimeframeState(
                 timeframe=timeframe,
@@ -64,7 +65,7 @@ class MarketStateReducer:
                     fact.fact_id
                     for fact in tf_facts
                     if fact.fact_type == FactType.SWING_POINT
-                    and self.reference_lifecycle.is_eligible(
+                    and self.structure_lifecycle.is_eligible(
                         fact.fact_id,
                         facts,
                         as_of=as_of,

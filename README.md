@@ -35,27 +35,34 @@ facts, timestamps, geometry, position sizing, or risk checks.
 - Market-calendar-aware adjacency for explicit weekend/maintenance closures.
 - Single-use reference lifecycle plus range replay and restart catch-up APIs.
 - Traceable semantic decisions and a typed v0 close-acceptance contract.
+- Append-only M3 raid episodes and setup transitions through same-timeframe
+  shift, linked repricing/FVG, reaction, readiness, invalidation, or expiry.
+- Independent liquidity/structure lifecycle, cross-timeframe provenance, and
+  append-only swing hierarchy promotions.
+- Traceable `ReadyForLLMPayload` snapshots containing raw evidence, targets,
+  and supplied context.
 
 The frozen design contract is in `docs/spec_v0.md`; implementation milestones
 are in `docs/implementation_plan.md`, and pinned research provenance is in
 `docs/source_registry.md`. The complete 74-message source snapshot is retained
-in `chat_web/ICT-LLM-Trading-conversation.md`.
+in `chat_web/ICT-LLM-Trading-conversation.md`; the frozen M3 directive is in
+`chat_web/M3-plan.md`.
 
 ## Intentionally unresolved policies
 
 The source design did not freeze these market semantics, so the package does
 not silently invent defaults for them:
 
-- the exact XAUUSD trading-day boundary/rollover;
 - the concrete broker/data-source market calendar;
 - session windows and overlap priority;
-- multi-bar raid/MSS timing and semantic candidate-window bounds.
+- semantic candidate-window bounds and replay calibration of M3 windows.
 
 The v0 close-acceptance default is now frozen as one setup-timeframe close with
 zero buffer; its alternative calibrations remain research rather than runtime
 ambiguity. See `OPEN_QUESTIONS.md` for the complete status register.
 
-`TradingDayPolicy` is therefore required by the XAUUSD v0 profile factory.
+`build_exness_xauusd_intraday_v0()` freezes Exness candle timestamps and D1
+boundaries to UTC for M3; New York session clocks remain separate.
 Structural relevance is assigned by the semantic evaluator rather than a
 hard-coded swing rank.
 

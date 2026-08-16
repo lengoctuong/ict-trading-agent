@@ -43,7 +43,9 @@ class ParameterSpec(SchemaModel):
             and self.min_value > self.max_value
         ):
             raise ValueError("min_value cannot exceed max_value")
-        if isinstance(self.default, (int, float)) and not isinstance(self.default, bool):
+        if isinstance(self.default, (int, float)) and not isinstance(
+            self.default, bool
+        ):
             if self.min_value is not None and self.default < self.min_value:
                 raise ValueError("default is below min_value")
             if self.max_value is not None and self.default > self.max_value:
@@ -85,7 +87,10 @@ class ConceptSpec(SchemaModel):
 
     @model_validator(mode="after")
     def validate_timeframe_scope(self) -> "ConceptSpec":
-        if self.timeframe_scope == TimeframeScope.BAR_BASED and not self.supported_timeframes:
+        if (
+            self.timeframe_scope == TimeframeScope.BAR_BASED
+            and not self.supported_timeframes
+        ):
             raise ValueError("bar_based concepts require supported_timeframes")
         return self
 
@@ -181,7 +186,7 @@ class SessionPolicy(SchemaModel):
 
 
 class TradingDayPolicy(SchemaModel):
-    """Explicit because the transcript did not choose broker/UTC/NY rollover."""
+    """Data-source candle-day boundary; session clocks remain separate."""
 
     timezone: NonEmptyStr
     rollover_local_time: time
@@ -245,4 +250,15 @@ def build_xauusd_intraday_v0(trading_day: TradingDayPolicy) -> TradingProfile:
         ],
         decision_core=["liquidity_event", "displacement", "structure_shift"],
         decision_context=["htf_bias", "session", "volatility_regime"],
+    )
+
+
+def build_exness_xauusd_intraday_v0() -> TradingProfile:
+    """Frozen M3 clock preset: Exness candles/PDH-PDL use the UTC D1."""
+
+    return build_xauusd_intraday_v0(
+        TradingDayPolicy(
+            timezone="UTC",
+            rollover_local_time=time(0, 0),
+        )
     )

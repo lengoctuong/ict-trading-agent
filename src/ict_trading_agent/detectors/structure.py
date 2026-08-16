@@ -64,6 +64,15 @@ class PriceBreakDetector:
                 "close_price": close,
                 "close_distance_points": distance,
                 "break_method": "close",
+                "detection_timeframe": bar.timeframe.value,
+                "reference_timeframe": (
+                    reference.timeframe.value
+                    if reference.timeframe is not None
+                    else None
+                ),
+                "same_timeframe_structure_eligible": (
+                    reference.timeframe == bar.timeframe
+                ),
             },
             detector_name=self.name,
             detector_version=self.version,
@@ -78,6 +87,9 @@ class StructureBreakCandidateDetector:
             raise ValueError("structure candidate requires a price-break fact")
         if price_break.direction not in {Direction.BULLISH, Direction.BEARISH}:
             raise ValueError("price-break fact requires a directional close")
+        same_timeframe = bool(
+            price_break.metrics.get("same_timeframe_structure_eligible")
+        )
         return ConceptCandidate(
             candidate_id=stable_candidate_id(
                 CandidateType.STRUCTURE_BREAK.value,
@@ -97,5 +109,10 @@ class StructureBreakCandidateDetector:
             machine_labels=[
                 "close_through_confirmed_swing",
                 "unclassified_structure_break",
+                (
+                    "same_timeframe_structure_eligible"
+                    if same_timeframe
+                    else "cross_timeframe_reference_interaction"
+                ),
             ],
         )

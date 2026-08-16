@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from .enums import SetupStatus
+from typing import Any
 
+from pydantic import AwareDatetime, Field, model_validator
+
+from .base import NonEmptyStr, SchemaModel
+from .enums import SetupStatus
 
 ALLOWED_SETUP_TRANSITIONS: dict[SetupStatus, frozenset[SetupStatus]] = {
     SetupStatus.DETECTED: frozenset(
@@ -43,3 +47,29 @@ def assert_setup_transition(current: SetupStatus, target: SetupStatus) -> None:
     if not can_transition_setup(current, target):
         raise ValueError(f"invalid setup transition: {current.value} -> {target.value}")
 
+
+class SetupTransition(SchemaModel):
+    """Immutable evidence-bearing transition in a setup episode."""
+
+    transition_id: NonEmptyStr
+    setup_candidate_id: NonEmptyStr
+    from_status: SetupStatus | None = None
+    to_status: SetupStatus
+    occurred_at: AwareDatetime
+    available_at: AwareDatetime
+    evidence_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
+    evidence_fact_ids: list[NonEmptyStr] = Field(default_factory=list)
+    entry_zone_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
+    reason_codes: list[NonEmptyStr] = Field(default_factory=list)
+    expires_at: AwareDatetime | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_transition(self) -> "SetupTransition":
+        if self.available_at < self.occurred_at:
+            raise ValueError("transition availability cannot precede occurrence")
+        if self.from_status is not None:
+            assert_setup_transition(self.from_status, self.to_status)
+        if self.expires_at is not None and self.expires_at <= self.available_at:
+            raise ValueError("transition expiry must follow availability")
+        return self

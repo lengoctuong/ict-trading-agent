@@ -6,61 +6,75 @@ means that design is enforced by code and tests.
 
 ## Open / needs policy or calibration
 
-1. **Concrete XAUUSD trading day — OPEN; production/backtest blocker.**
-   `TradingDayPolicy` carries timezone and rollover configuration, but the
-   project still needs the selected broker/data-source definition and helpers
-   for trading-day ID, previous day, start, and end. Do not hard-code UTC,
-   broker midnight, or New York 17:00 before that choice.
-
-2. **Concrete market calendar — OPEN; real-data blocker.** The code now
+1. **Concrete market calendar — OPEN; real-data blocker.** The code now
    distinguishes wall-clock adjacency from market-sequence adjacency through
    an explicit closure calendar. Weekend and maintenance closures must still be
    supplied and versioned by the selected XAUUSD data source. An unexplained
    gap remains a missing-bar error.
 
-3. **Session windows and overlap priority — OPEN.** Session names are frozen,
+2. **Session windows and overlap priority — OPEN.** Session names are frozen,
    but exact local windows and the primary session during overlaps are not.
 
-4. **Multi-bar raid and MSS temporal matching — OPEN.** M2 supports the
-   canonical same-bar breach/reclaim. Maximum reclaim span and allowed timing
-   among raid, structural shift, displacement, and FVG remain research policy.
+3. **M3 window calibration — OPEN, non-blocking research.** Runtime v0 is
+   frozen and implemented as reclaim <=3 bars; raid-to-shift M5/M15/H1 =
+   12/8/4 bars; and FVG expiry = 24/16/6 bars. Replay may calibrate alternatives
+   but must version any later change.
 
-5. **Displacement calibration — OPEN, non-blocking research.** Directional
+4. **Displacement calibration — OPEN, non-blocking research.** Directional
    candles now remain visible as permissive candidates. Baseline length and
    thresholds for body/range, body/baseline, wick, close location, ATR, and
    robust median features still need calibration by timeframe and session.
 
-6. **Tick-boundary semantics — OPEN.** Strict tick-normalized comparisons mean
+5. **Tick-boundary semantics — OPEN.** Strict tick-normalized comparisons mean
    a close exactly on a breached level is neither reclaim nor close-through.
    Equality/tolerance behavior must be selected for the actual price feed.
 
-7. **TradingView transition snapshot — OPEN before M3.** The selected script is
-   mutable and has no immutable commit. Every adopted RAID -> SHIFT ->
-   ENTRY_ZONE transition must be frozen locally in contracts and fixtures.
-
-8. **Candidate-window bounds — OPEN, operational calibration.** Structural
+6. **Semantic candidate-window bounds — OPEN, operational calibration.** Structural
    relevance belongs to the semantic evaluator, but deterministic limits for
    age, distance, timeframe, and recent-candidate count are still needed before
    sending MarketState to an LLM.
 
-9. **Close-acceptance calibration — OPEN, non-blocking research.** The v0
+7. **Close-acceptance calibration — OPEN, non-blocking research.** The v0
    default is implemented as one setup-timeframe close beyond the invalidation
    level with zero distance buffer. Alternatives such as two closes or an ATR
    buffer remain replay experiments, not runtime ambiguity.
 
 ## Resolved and implemented
 
+- **M3 clock/data policy — IMPLEMENTED.** Exness source candles use UTC;
+  D1/H4 and PDH/PDL follow the Exness candle feed. New York remains the
+  independent clock for sessions, killzones, and the 00:00 NY True Day Open.
+  `build_exness_xauusd_intraday_v0()` freezes the UTC candle-day preset.
+- **M3 lifecycle — IMPLEMENTED.** Raid episodes advance through directionally
+  linked same-timeframe structure breaks, permissive displacement, causal FVG,
+  and favorable reaction close to `READY_FOR_LLM`, or terminate as
+  `INVALIDATED` / `EXPIRED` with append-only reason-coded transitions.
+- **Multi-bar reclaim and timing — IMPLEMENTED as versioned research policy.**
+  Same-bar reclaim is canonical; reclaim within three bars is permissive; late
+  reclaim remains raw evidence. Shift and FVG clocks use tradable bar counts.
+- **Liquidity versus structure lifecycle — IMPLEMENTED.** Liquidity is
+  single-use per reference/detection timeframe. A wick `TAKEN` observation does
+  not erase structural value; structural references independently become
+  `BROKEN` or explicitly `SUPERSEDED`.
+- **Cross-timeframe provenance — IMPLEMENTED.** Every level interaction records
+  detection and reference timeframe. Cross-TF close-through remains raw
+  evidence; only same-TF close-through is eligible for a shift.
+- **Swing hierarchy — IMPLEMENTED.** STH/STL observations are preserved and
+  ITH/ITL then LTH/LTL promotions are appended without rewriting lower ranks.
+- **Local M3 transition snapshot — IMPLEMENTED.** The adopted rules from the
+  mutable TradingView source are restated in `chat_web/M3-plan.md`, contracts,
+  reason codes, and causal fixtures.
 - **Structural reference relevance — RESOLVED.** Machine code exposes valid
   confirmed swing-break candidates and keeps them `UNCLASSIFIED`; the semantic
   evaluator decides which reference is contextually significant.
-- **Close acceptance v0 — IMPLEMENTED as a typed contract.** Setup timeframe,
-  one consecutive close, zero buffer. Enforcement belongs to the M3 lifecycle.
+- **Close acceptance v0 — IMPLEMENTED and enforced.** One setup-timeframe close
+  beyond the raid extreme with zero buffer invalidates the setup.
 - **Semantic decision identity — IMPLEMENTED.** `SetupSemanticDecision` has
   `decision_id` and `assessment_id`; `TradeDecision` references
   `semantic_decision_id`.
-- **Reference-level lifecycle — IMPLEMENTED.** Default policy is append-only
-  `ACTIVE -> TAKEN`, after which the level is historical and ineligible. Reuse
-  requires an explicit `ReferenceLifecyclePolicy` override.
+- **Reference-level lifecycle — IMPLEMENTED.** Default liquidity policy is
+  append-only `ACTIVE -> TAKEN` per detection timeframe. Reuse requires an
+  explicit `ReferenceLifecyclePolicy` override.
 - **Displacement permissiveness — IMPLEMENTED.** Every directional candle can
   produce a repricing candidate with individual threshold results; thresholds
   do not erase evidence before semantic evaluation.

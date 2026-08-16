@@ -8,8 +8,8 @@ from .base import NonEmptyStr, SchemaModel
 from .enums import (
     CandidateType,
     Direction,
-    SetupStatus,
     Session,
+    SetupStatus,
     TargetScope,
     TargetSide,
     TargetType,
@@ -83,6 +83,7 @@ class SetupCandidate(SchemaModel):
     target_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
     hard_invalidation_price: float | None = Field(default=None, gt=0.0)
     expires_at: AwareDatetime | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_setup_candidate(self) -> "SetupCandidate":

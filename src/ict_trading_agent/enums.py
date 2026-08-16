@@ -79,6 +79,7 @@ class Session(str, Enum):
 
 class FactType(str, Enum):
     SWING_POINT = "swing_point"
+    SWING_PROMOTION = "swing_promotion"
     PRICE_BREAK = "price_break"
     LEVEL_BREACH = "level_breach"
     LEVEL_RECLAIM = "level_reclaim"
@@ -87,12 +88,16 @@ class FactType(str, Enum):
     SESSION_LEVEL = "session_level"
     PREVIOUS_DAY_LEVEL = "previous_day_level"
     REFERENCE_STATE = "reference_state"
+    STRUCTURE_STATE = "structure_state"
+    FVG_REACTION = "fvg_reaction"
+    RESEARCH_OBSERVATION = "research_observation"
 
 
 class CandidateType(str, Enum):
     LIQUIDITY_EVENT = "liquidity_event"
     DISPLACEMENT = "displacement"
     STRUCTURE_BREAK = "structure_break"
+    SHIFT = "shift"
     MSS = "mss"
     FVG = "fvg"
     TARGET = "target"
@@ -228,8 +233,15 @@ class ReferenceStatus(str, Enum):
     TAKEN = "taken"
 
 
+class StructureReferenceStatus(str, Enum):
+    ACTIVE = "active"
+    BROKEN = "broken"
+    SUPERSEDED = "superseded"
+
+
 class FvgLifecycle(str, Enum):
     FRESH = "fresh"
     TOUCHED = "touched"
     CE_REACHED = "ce_reached"
     FULLY_FILLED = "fully_filled"
+    REACTED = "reacted"

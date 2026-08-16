@@ -57,6 +57,9 @@ have bounded roles and must pass point-in-time replay tests before adoption.
 - Reproducibility warning: this is a mutable TradingView publication without a
   Git commit. Every rule taken from it must be restated in project tests and
   contracts; no live upstream behavior is imported at runtime.
+- The locally frozen M3 adaptation and research windows are retained in
+  `chat_web/M3-plan.md`, captured from the planner share at
+  <https://chatgpt.com/share/6a81f8a0-39e0-83ec-9a96-e752c1d84802>.
 
 ## M2 adoption decisions
 

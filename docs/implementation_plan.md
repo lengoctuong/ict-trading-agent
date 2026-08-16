@@ -30,7 +30,7 @@ Status: implemented and covered by causal synthetic fixtures.
 
 ## M2.1 — Real-data and replay hardening
 
-Status: implemented; concrete broker calendar/trading-day presets remain open.
+Status: implemented; concrete broker closure calendar remains open.
 
 - Market-calendar-aware bar adjacency with explicit versionable closures.
 - Mean/median body and range plus ATR raw baselines.
@@ -41,7 +41,8 @@ Status: implemented; concrete broker calendar/trading-day presets remain open.
 
 ## M3 — Setup state machine
 
-Status: next milestone; transition policies remain subject to the open questions.
+Status: implemented with causal synthetic fixtures; research windows remain
+versioned calibration parameters for M4.
 
 ```text
 IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
@@ -50,6 +51,13 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 - FVG touch/penetration/reaction facts.
 - Deterministic invalidation/expiry policies.
 - Structured READY_FOR_LLM JSON output.
+- Independent liquidity and structural-reference lifecycle.
+- Detection/reference timeframe provenance and same-TF shift eligibility.
+- Append-only STH/STL -> ITH/ITL -> LTH/LTL promotions.
+- Canonical same-bar and permissive <=3-bar reclaim episodes.
+- Raid-to-shift windows M5/M15/H1 = 12/8/4 tradable bars.
+- Causal shift/repricing/FVG linkage and FVG expiry 24/16/6 bars.
+- Append-only setup transitions and reason-coded near-miss observations.
 
 ## M4 — Replay/backtest harness
 

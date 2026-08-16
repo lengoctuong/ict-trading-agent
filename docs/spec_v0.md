@@ -42,8 +42,9 @@ and ACCEPT/REJECT. It cannot rewrite facts or override safety.
   - M1: optional refinement.
 - Target universe: local swing, session high/low, previous-day high/low, and
   external liquidity.
-- Exact trading-day rollover is intentionally unresolved and must be supplied
-  through `TradingDayPolicy`.
+- M3 data-clock freeze: Exness timestamps/candles are UTC; D1/H4 and PDH/PDL
+  use Exness candle boundaries. New York time remains a separate contextual
+  clock for sessions, killzones, and ICT True Day Open 00:00 NY.
 
 ## 3. Phase-0 concept universe
 
@@ -109,8 +110,17 @@ Swing low:  L[n] < L[n-1] and L[n] < L[n+1]
 A confirmed swing/session/previous-day extreme can create a reference pool.
 Pool taken is a breach; a canonical same-bar sweep additionally requires close
 reclaim. The first breach appends a `TAKEN` lifecycle observation and makes the
-reference historical/ineligible under the default single-use policy. Reuse
-requires an explicit policy override. Multi-bar raid/reclaim remains deferred.
+reference ineligible for another liquidity event on that detection timeframe
+under the default single-use policy. Reuse requires an explicit override.
+Reclaim within three detection-timeframe bars creates a permissive raid; later
+reclaim remains logged without setup promotion. Nearby evidence for one
+reference is grouped into a single raid episode.
+
+Liquidity lifecycle and structural lifecycle are independent. A wick breach
+does not erase a swing's structural role. Same-timeframe close-through appends
+`BROKEN`; a later reference-selection policy may explicitly append
+`SUPERSEDED`. Cross-timeframe interaction records both timeframes but cannot
+declare the higher-timeframe structure broken.
 
 ### Displacement
 
@@ -143,6 +153,10 @@ candidate/semantic concerns when ambiguous. MSS relates CHoCH, matching
 displacement, and a causally linked FVG without double-counting them as four
 independent score components.
 
+STH/STL facts remain immutable. Three same-rank extrema can append an ITH/ITL
+promotion; the same procedure can append LTH/LTL from intermediate swings.
+Promotion never removes or rewrites the lower-rank observation.
+
 ## 6. Setup lifecycle
 
 TradingView ICT-2022/Silver-Bullet implementations are reference state
@@ -166,6 +180,28 @@ LLM                                             -> ACCEPTED | REJECTED
 safety                                          -> ENTERED | RISK_REJECTED
 position completion                             -> CLOSED
 ```
+
+Frozen M3 research windows use tradable-bar counts:
+
+```text
+multi-bar reclaim: <= 3 bars
+raid -> shift:     M5=12, M15=8, H1=4
+FVG expiry:        M5=24, M15=16, H1=6 from FVG availability
+repricing candle:  shift bar or its next bar
+```
+
+A shift is eligible only when its setup-timeframe candle closes through a
+confirmed swing on that same timeframe in the raid direction. It remains
+`UNCLASSIFIED`; the semantic evaluator decides whether it is noise, internal
+CHoCH, or a meaningful reversal. The linked FVG must be formed by the selected
+repricing candle. Touch records `touched`, `penetration_fraction`, and
+`favorable_close_outside`; only a favorable close outside the zone promotes the
+setup to `READY_FOR_LLM`.
+
+Every setup origin and transition is append-only. Failed links, late events,
+touch-only reactions, thresholds, and reason codes remain available for M4
+research. A READY payload carries the reconstructed setup, all referenced raw
+facts/candidates, available untaken targets, and supplied context.
 
 Reference implementations suggest invalidating/discarding when structure is
 reclaimed, the target is hit before entry, the entry-zone/FVG opportunity
@@ -195,9 +231,10 @@ Deterministic checks own data freshness, spread, entry/stop validity, RR, daily
 loss, exposure, position limits, trading-day validity, sizing, and execution.
 No LLM output can override a failed safety check.
 
-The v0 close-acceptance contract is one close on the setup timeframe beyond the
-invalidation level with zero distance buffer. Alternative counts/buffers are
-research configurations and must not change the recorded v0 default silently.
+The v0 close-acceptance contract is enforced as one close on the setup
+timeframe beyond the raid extreme with zero distance buffer. Alternative
+levels, counts, or buffers are research configurations and must not change the
+recorded v0 default silently.
 
 ## 9. Reference-source roles
 
@@ -213,11 +250,9 @@ decision and a bounded role.
 
 ## 10. Remaining open policies
 
-- XAUUSD trading-day boundary for the selected data source/broker.
 - Concrete broker/data-source market calendar and closure versioning.
 - Semantic candidate-window age, distance, timeframe, and count bounds.
 - Exact session windows and overlap policy.
-- Multi-bar sweep limits and MSS temporal matching window.
+- Replay calibration of the versioned M3 reclaim, shift, and FVG-expiry windows.
 - Per-timeframe/session displacement baseline and threshold calibration.
 - Equality/tolerance semantics for closes exactly on a reference level.
-- Immutable local freeze of every TradingView-derived M3 transition.
