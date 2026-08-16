@@ -7,7 +7,7 @@ from pydantic import AwareDatetime
 from .base import SchemaModel
 from .detectors.common import stable_fact_id
 from .detectors.levels import ReferenceLevel
-from .enums import FactType, ReferenceStatus, Timeframe
+from .enums import FactType, ReferenceStatus
 from .facts import ObservableFact
 
 
@@ -30,17 +30,11 @@ class ReferenceLifecycleTracker:
         facts: Iterable[ObservableFact],
         *,
         as_of: AwareDatetime,
-        detection_timeframe: Timeframe | None = None,
     ) -> ReferenceStatus:
         for fact in facts:
             if fact.available_at > as_of:
                 continue
             if fact.metrics.get("reference_fact_id") != reference_fact_id:
-                continue
-            if (
-                detection_timeframe is not None
-                and fact.timeframe != detection_timeframe
-            ):
                 continue
             if fact.fact_type in {FactType.LEVEL_BREACH, FactType.REFERENCE_STATE}:
                 return ReferenceStatus.TAKEN
@@ -52,7 +46,6 @@ class ReferenceLifecycleTracker:
         facts: Iterable[ObservableFact],
         *,
         as_of: AwareDatetime,
-        detection_timeframe: Timeframe | None = None,
     ) -> bool:
         if self.policy.reuse_taken_levels:
             return True
@@ -61,7 +54,6 @@ class ReferenceLifecycleTracker:
                 reference_fact_id,
                 facts,
                 as_of=as_of,
-                detection_timeframe=detection_timeframe,
             )
             == ReferenceStatus.ACTIVE
         )

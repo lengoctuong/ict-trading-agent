@@ -262,10 +262,11 @@ def test_xauusd_profile_preserves_frozen_roles_and_sessions() -> None:
     assert profile.session_policy.contextual_feature is True
 
 
-def test_exness_m3_profile_uses_utc_candle_day() -> None:
+def test_exness_m3_profile_uses_utc_source_d1_candles() -> None:
     profile = build_exness_xauusd_intraday_v0()
     assert profile.trading_day.timezone == "UTC"
-    assert profile.trading_day.rollover_local_time == time(0, 0)
+    assert profile.trading_day.rollover_local_time is None
+    assert profile.trading_day.source_candle_timeframe == Timeframe.D1
 
 
 def test_core_concept_specs_capture_point_in_time_rules() -> None:

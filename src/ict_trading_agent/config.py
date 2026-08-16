@@ -189,7 +189,8 @@ class TradingDayPolicy(SchemaModel):
     """Data-source candle-day boundary; session clocks remain separate."""
 
     timezone: NonEmptyStr
-    rollover_local_time: time
+    rollover_local_time: time | None = None
+    source_candle_timeframe: Timeframe | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -199,6 +200,17 @@ class TradingDayPolicy(SchemaModel):
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"unknown IANA timezone: {value}") from exc
         return value
+
+    @model_validator(mode="after")
+    def validate_boundary_source(self) -> "TradingDayPolicy":
+        configured = self.rollover_local_time is not None
+        feed_defined = self.source_candle_timeframe is not None
+        if configured == feed_defined:
+            raise ValueError(
+                "choose exactly one trading-day boundary: configured rollover "
+                "or source candle timeframe"
+            )
+        return self
 
 
 class TradingProfile(SchemaModel):
@@ -254,11 +266,11 @@ def build_xauusd_intraday_v0(trading_day: TradingDayPolicy) -> TradingProfile:
 
 
 def build_exness_xauusd_intraday_v0() -> TradingProfile:
-    """Frozen M3 clock preset: Exness candles/PDH-PDL use the UTC D1."""
+    """Exness timestamps are UTC; PDH/PDL use completed source D1 candles."""
 
     return build_xauusd_intraday_v0(
         TradingDayPolicy(
             timezone="UTC",
-            rollover_local_time=time(0, 0),
+            source_candle_timeframe=Timeframe.D1,
         )
     )

@@ -28,7 +28,7 @@ from .reference_lifecycle import (
 )
 from .stores import CandidateStore, DuplicateRecordError, FactStore
 from .structure_lifecycle import StructureLifecycleTracker
-from .swing_hierarchy import SwingHierarchyPromoter
+from .swing_hierarchy import SwingHierarchyPromoter, effective_swing_rank
 
 
 class M2DetectionBatch(SchemaModel):
@@ -176,9 +176,8 @@ class M2PrimitivePipeline:
             reference = ReferenceLevel.from_fact(reference_fact)
             liquidity_eligible = self.reference_lifecycle.is_eligible(
                 reference.reference_fact_id,
-                visible_at_open,
-                as_of=bar.open_time,
-                detection_timeframe=bar.timeframe,
+                self.fact_store.visible(as_of=bar.close_time, symbol=bar.symbol),
+                as_of=bar.close_time,
             )
             if liquidity_eligible:
                 interactions = self.level_interactions.detect(bar, reference)
@@ -207,6 +206,18 @@ class M2PrimitivePipeline:
             ):
                 price_break = self.price_breaks.detect(bar, reference)
                 if price_break is not None:
+                    rank = effective_swing_rank(
+                        reference.reference_fact_id,
+                        [*visible_at_open, *facts],
+                        as_of=price_break.available_at,
+                    )
+                    price_break = price_break.model_copy(
+                        update={
+                            "metrics": price_break.metrics
+                            | {"effective_rank_as_of_break": rank.value}
+                        },
+                        deep=True,
+                    )
                     facts.append(price_break)
                     candidates.append(self.structure_breaks.detect(price_break))
                     if price_break.metrics["same_timeframe_structure_eligible"]:

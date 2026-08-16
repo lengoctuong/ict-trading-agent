@@ -94,3 +94,48 @@ class SetupCandidate(SchemaModel):
         if self.expires_at is not None and self.expires_at <= self.available_at:
             raise ValueError("expires_at must be after available_at")
         return self
+
+
+class RaidEpisode(SchemaModel):
+    """Global liquidity-take episode shared by all observing timeframes."""
+
+    raid_episode_id: NonEmptyStr
+    reference_fact_id: NonEmptyStr
+    symbol: NonEmptyStr
+    direction: Direction
+    created_at: AwareDatetime
+    available_at: AwareDatetime
+    first_raid_candidate_id: NonEmptyStr
+    raid_candidate_ids: list[NonEmptyStr]
+    observation_fact_ids: list[NonEmptyStr]
+    observed_timeframes: list[Timeframe]
+    extreme: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_episode(self) -> "RaidEpisode":
+        if self.direction == Direction.NEUTRAL:
+            raise ValueError("a raid episode direction cannot be neutral")
+        if self.available_at < self.created_at:
+            raise ValueError("episode availability cannot precede creation")
+        if self.first_raid_candidate_id not in self.raid_candidate_ids:
+            raise ValueError("first raid candidate must belong to the episode")
+        if not self.observation_fact_ids or not self.observed_timeframes:
+            raise ValueError("a raid episode requires an initial observation")
+        return self
+
+
+class RaidEpisodeUpdate(SchemaModel):
+    update_id: NonEmptyStr
+    raid_episode_id: NonEmptyStr
+    occurred_at: AwareDatetime
+    available_at: AwareDatetime
+    observation_fact_id: NonEmptyStr
+    observation_timeframe: Timeframe
+    raid_candidate_id: NonEmptyStr | None = None
+    extreme: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_update(self) -> "RaidEpisodeUpdate":
+        if self.available_at < self.occurred_at:
+            raise ValueError("episode update availability cannot precede occurrence")
+        return self

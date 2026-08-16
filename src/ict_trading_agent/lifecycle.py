@@ -60,6 +60,7 @@ class SetupTransition(SchemaModel):
     evidence_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
     evidence_fact_ids: list[NonEmptyStr] = Field(default_factory=list)
     entry_zone_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
+    hard_invalidation_price: float | None = Field(default=None, gt=0.0)
     reason_codes: list[NonEmptyStr] = Field(default_factory=list)
     expires_at: AwareDatetime | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)

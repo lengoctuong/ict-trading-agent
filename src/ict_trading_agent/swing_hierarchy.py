@@ -2,9 +2,44 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from pydantic import AwareDatetime
+
 from .detectors.common import stable_fact_id
 from .enums import FactType, SwingRank, SwingSide
 from .facts import ObservableFact, PriceGeometry
+
+_RANK_ORDER = {
+    SwingRank.SHORT_TERM: 0,
+    SwingRank.INTERMEDIATE: 1,
+    SwingRank.LONG_TERM: 2,
+}
+
+
+def effective_swing_rank(
+    reference_fact_id: str,
+    facts: Iterable[ObservableFact],
+    *,
+    as_of: AwareDatetime,
+) -> SwingRank:
+    """Resolve the highest append-only promotion visible at break time."""
+
+    rank = SwingRank.SHORT_TERM
+    for fact in facts:
+        if fact.available_at > as_of:
+            continue
+        is_origin = (
+            fact.fact_id == reference_fact_id and fact.fact_type == FactType.SWING_POINT
+        )
+        is_promotion = (
+            fact.fact_type == FactType.SWING_PROMOTION
+            and fact.metrics.get("promoted_swing_fact_id") == reference_fact_id
+        )
+        if not (is_origin or is_promotion):
+            continue
+        candidate_rank = SwingRank(str(fact.metrics.get("rank", rank.value)))
+        if _RANK_ORDER[candidate_rank] > _RANK_ORDER[rank]:
+            rank = candidate_rank
+    return rank
 
 
 class SwingHierarchyPromoter:

@@ -10,7 +10,10 @@ means that design is enforced by code and tests.
    distinguishes wall-clock adjacency from market-sequence adjacency through
    an explicit closure calendar. Weekend and maintenance closures must still be
    supplied and versioned by the selected XAUUSD data source. An unexplained
-   gap remains a missing-bar error.
+   gap remains a missing-bar error. Exness timestamps are UTC and completed
+   source D1 candles define PDH/PDL; the season-dependent XAUUSD closure around
+   21:00/22:00 UTC still belongs in this versioned source calendar, not in a
+   fabricated UTC-midnight trading day.
 
 2. **Session windows and overlap priority — OPEN.** Session names are frozen,
    but exact local windows and the primary session during overlaps are not.
@@ -41,26 +44,29 @@ means that design is enforced by code and tests.
 
 ## Resolved and implemented
 
-- **M3 clock/data policy — IMPLEMENTED.** Exness source candles use UTC;
-  D1/H4 and PDH/PDL follow the Exness candle feed. New York remains the
+- **M3 clock/data policy — IMPLEMENTED.** Exness source timestamps use UTC;
+  D1/H4 and PDH/PDL follow completed source candles rather than a synthesized
+  UTC-midnight day. New York remains the
   independent clock for sessions, killzones, and the 00:00 NY True Day Open.
-  `build_exness_xauusd_intraday_v0()` freezes the UTC candle-day preset.
-- **M3 lifecycle — IMPLEMENTED.** Raid episodes advance through directionally
-  linked same-timeframe structure breaks, permissive displacement, causal FVG,
-  and favorable reaction close to `READY_FOR_LLM`, or terminate as
-  `INVALIDATED` / `EXPIRED` with append-only reason-coded transitions.
+  `build_exness_xauusd_intraday_v0()` records UTC raw time plus feed-defined D1.
+- **M3.1 lifecycle — IMPLEMENTED.** One global RaidEpisode collects M1/M5/M15/H1
+  observations and creates independent H1/M15 setup paths with M5 entry
+  evidence. Stateful FVG zones and favorable reaction closes lead to
+  `READY_FOR_LLM`; trading terminals remain terminal while research observation
+  continues for the configured calibration horizon.
 - **Multi-bar reclaim and timing — IMPLEMENTED as versioned research policy.**
   Same-bar reclaim is canonical; reclaim within three bars is permissive; late
   reclaim remains raw evidence. Shift and FVG clocks use tradable bar counts.
 - **Liquidity versus structure lifecycle — IMPLEMENTED.** Liquidity is
-  single-use per reference/detection timeframe. A wick `TAKEN` observation does
+  single-use globally per reference. A wick `TAKEN` observation does
   not erase structural value; structural references independently become
   `BROKEN` or explicitly `SUPERSEDED`.
 - **Cross-timeframe provenance — IMPLEMENTED.** Every level interaction records
   detection and reference timeframe. Cross-TF close-through remains raw
   evidence; only same-TF close-through is eligible for a shift.
 - **Swing hierarchy — IMPLEMENTED.** STH/STL observations are preserved and
-  ITH/ITL then LTH/LTL promotions are appended without rewriting lower ranks.
+  ITH/ITL then LTH/LTL promotions are appended without rewriting lower ranks;
+  PRICE_BREAK and SHIFT evidence resolve the effective rank as-of break.
 - **Local M3 transition snapshot — IMPLEMENTED.** The adopted rules from the
   mutable TradingView source are restated in `chat_web/M3-plan.md`, contracts,
   reason codes, and causal fixtures.
@@ -73,7 +79,7 @@ means that design is enforced by code and tests.
   `decision_id` and `assessment_id`; `TradeDecision` references
   `semantic_decision_id`.
 - **Reference-level lifecycle — IMPLEMENTED.** Default liquidity policy is
-  append-only `ACTIVE -> TAKEN` per detection timeframe. Reuse requires an
+  append-only global `ACTIVE -> TAKEN` per reference. Reuse requires an
   explicit `ReferenceLifecyclePolicy` override.
 - **Displacement permissiveness — IMPLEMENTED.** Every directional candle can
   produce a repricing candidate with individual threshold results; thresholds

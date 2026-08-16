@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ict_trading_agent.candidates import TargetCandidate
+import pytest
+
+from ict_trading_agent.candidates import ConceptCandidate, TargetCandidate
 from ict_trading_agent.detectors import CandleFeatureConfig
 from ict_trading_agent.enums import (
     CandidateType,
+    Direction,
     FactType,
     SetupStatus,
     SwingRank,
@@ -70,6 +73,44 @@ def reference_fact(
     )
 
 
+def candle_fact(item: OHLCBar) -> ObservableFact:
+    return ObservableFact(
+        fact_id=f"candle-{item.timeframe.value}-{item.open_time.isoformat()}",
+        fact_type=FactType.CANDLE_FEATURES,
+        symbol=item.symbol,
+        timeframe=item.timeframe,
+        occurred_at=item.open_time,
+        confirmed_at=item.close_time,
+        available_at=item.close_time,
+        metrics={},
+        detector_name="fixture",
+        detector_version="0.1.0",
+    )
+
+
+def raid_candidate(item: OHLCBar) -> ConceptCandidate:
+    return ConceptCandidate(
+        candidate_id=f"raid-{item.timeframe.value}-{item.open_time.isoformat()}",
+        candidate_type=CandidateType.LIQUIDITY_EVENT,
+        symbol=item.symbol,
+        timeframe=item.timeframe,
+        direction=Direction.BULLISH,
+        occurred_at=item.open_time,
+        available_at=item.close_time,
+        evidence_fact_ids=["pdl-100"],
+        raw_features={
+            "reference_fact_id": "pdl-100",
+            "reference_timeframe": Timeframe.H1.value,
+            "reference_price": 100.0,
+            "reference_side": "sell_side",
+            "extreme": item.low,
+            "same_bar_reclaim": True,
+            "reclaim_span_bars": 0,
+        },
+        machine_labels=["canonical_same_bar_sweep_candidate"],
+    )
+
+
 def build_pipelines(
     bars: list[OHLCBar],
     *,
@@ -114,6 +155,8 @@ def build_pipelines(
         tick_size=0.1,
         candle_config=CandleFeatureConfig(baseline_period=3),
     )
+    if policy is None:
+        policy = M3Policy(setup_timeframes=(Timeframe.M5,))
     m3 = M3SetupPipeline(
         bar_feed=feed,
         fact_store=facts,
@@ -211,15 +254,13 @@ def test_full_m3_sequence_reaches_ready_for_llm_with_traceable_evidence() -> Non
         if fact.fact_type == FactType.FVG_REACTION
     ]
     assert len(reactions) == 1
-    assert reactions[0].metrics == {
-        "setup_candidate_id": setup.setup_candidate_id,
-        "entry_zone_candidate_id": setup.entry_zone_candidate_ids[0],
-        "touched": True,
-        "penetration_fraction": 0.5,
-        "favorable_close_outside": True,
-        "close_price": 104.5,
-        "lifecycle": "reacted",
-    }
+    assert reactions[0].metrics["setup_candidate_id"] == setup.setup_candidate_id
+    assert (
+        reactions[0].metrics["entry_zone_candidate_id"]
+        == setup.entry_zone_candidate_ids[0]
+    )
+    assert reactions[0].metrics["lifecycle"] == "reacted"
+    assert reactions[0].metrics["reaction_lag_bars"] == 0
     assert any(
         candidate.candidate_type == CandidateType.SHIFT
         for candidate in candidates.visible(as_of=bars[-1].close_time)
@@ -296,6 +337,7 @@ def test_setup_invalidates_on_one_setup_tf_close_beyond_raid_extreme() -> None:
 
 def test_raid_expires_when_no_shift_arrives_inside_configured_window() -> None:
     policy = M3Policy(
+        setup_timeframes=(Timeframe.M5,),
         shift_window_bars={Timeframe.M5: 1, Timeframe.M15: 8, Timeframe.H1: 4},
         fvg_expiry_bars={Timeframe.M5: 24, Timeframe.M15: 16, Timeframe.H1: 6},
     )
@@ -310,6 +352,7 @@ def test_raid_expires_when_no_shift_arrives_inside_configured_window() -> None:
 
 def test_fvg_touch_only_is_logged_then_entry_opportunity_expires() -> None:
     policy = M3Policy(
+        setup_timeframes=(Timeframe.M5,),
         shift_window_bars={Timeframe.M5: 12, Timeframe.M15: 8, Timeframe.H1: 4},
         fvg_expiry_bars={Timeframe.M5: 2, Timeframe.M15: 16, Timeframe.H1: 6},
     )
@@ -317,7 +360,7 @@ def test_fvg_touch_only_is_logged_then_entry_opportunity_expires() -> None:
         # Touch/penetrate, but close inside rather than favorably above the FVG.
         bar(6, open_=104.5, high=105.0, low=102.5, close=102.8),
         # Second eligible bar completes the configured expiry budget.
-        bar(7, open_=103.2, high=104.0, low=103.2, close=103.5),
+        bar(7, open_=103.2, high=104.0, low=102.5, close=102.8),
     ]
     batches, facts, _, setups = run_sequence(bars, policy=policy)
     setup_at_touch = setups.visible(as_of=bars[6].close_time)[0]
@@ -343,7 +386,7 @@ def test_fvg_touch_only_is_logged_then_entry_opportunity_expires() -> None:
                 if fact.fact_type == FactType.FVG_REACTION
             ]
         )
-        == 1
+        == 2
     )
 
 
@@ -472,3 +515,352 @@ def test_m3_range_replay_and_catch_up_share_the_realtime_path() -> None:
     sequential_origins, sequential_transitions = sequential_setups.as_mappings()
     assert set(replay_origins) == set(sequential_origins)
     assert set(replay_transitions) == set(sequential_transitions)
+
+
+def test_m5_take_is_global_but_m15_observes_the_same_raid_episode() -> None:
+    m5 = bar(0, open_=101.0, high=102.0, low=99.0, close=101.0)
+    m15 = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0,
+        close_time=T0 + timedelta(minutes=15),
+        open=101.0,
+        high=102.0,
+        low=98.5,
+        close=101.0,
+    )
+    feed = ClosedBarFeed("XAUUSD")
+    for item in (m5, m15):
+        feed.append(item, observed_at=item.close_time)
+    facts = FactStore()
+    facts.extend(
+        [
+            reference_fact(
+                fact_id="pdl-100",
+                fact_type=FactType.PREVIOUS_DAY_LEVEL,
+                timeframe=Timeframe.H1,
+                side="low",
+                price=100.0,
+            ),
+            candle_fact(m5),
+            candle_fact(m15),
+        ]
+    )
+    candidates = CandidateStore()
+    candidates.append(raid_candidate(m5))
+    setups = SetupStore()
+    m3 = M3SetupPipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        setup_store=setups,
+        tick_size=0.1,
+    )
+
+    first = m3.process_latest(timeframe=Timeframe.M5, as_of=m5.close_time)
+    second = m3.process_latest(timeframe=Timeframe.M15, as_of=m15.close_time)
+
+    assert len(first.raid_episodes_created) == 1
+    assert len(second.raid_updates) == 1
+    episode = m3.raid_store.visible(as_of=m15.close_time)[0]
+    assert episode.observed_timeframes == [Timeframe.M5, Timeframe.M15]
+    assert episode.extreme == 98.5
+    assert {item.setup_timeframe for item in setups.visible(as_of=m15.close_time)} == {
+        Timeframe.H1,
+        Timeframe.M15,
+    }
+    assert all(
+        item.hard_invalidation_price == 98.5
+        for item in setups.visible(as_of=m15.close_time)
+    )
+
+
+def test_m5_raid_m15_shift_and_m5_entry_fvg_are_decoupled() -> None:
+    raid_bar = bar(0, open_=101.0, high=102.0, low=99.0, close=101.0)
+    shift_bar = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0,
+        close_time=T0 + timedelta(minutes=15),
+        open=101.0,
+        high=105.0,
+        low=100.5,
+        close=104.5,
+    )
+    entry_bar = bar(3, open_=104.5, high=106.0, low=104.0, close=105.5)
+    feed = ClosedBarFeed("XAUUSD")
+    for item in (raid_bar, entry_bar, shift_bar):
+        feed.append(item, observed_at=item.close_time)
+    facts = FactStore()
+    facts.extend(
+        [
+            reference_fact(
+                fact_id="pdl-100",
+                fact_type=FactType.PREVIOUS_DAY_LEVEL,
+                timeframe=Timeframe.H1,
+                side="low",
+                price=100.0,
+            ),
+            candle_fact(raid_bar),
+            candle_fact(shift_bar),
+            candle_fact(entry_bar),
+            ObservableFact(
+                fact_id="entry-fvg",
+                fact_type=FactType.FVG_GEOMETRY,
+                symbol="XAUUSD",
+                timeframe=Timeframe.M5,
+                occurred_at=entry_bar.open_time,
+                confirmed_at=entry_bar.close_time,
+                available_at=entry_bar.close_time,
+                direction=Direction.BULLISH,
+                geometry=PriceGeometry(low=102.0, high=103.0),
+                metrics={"ce": 102.5},
+                detector_name="fixture",
+                detector_version="0.1.0",
+            ),
+        ]
+    )
+    candidates = CandidateStore()
+    candidates.extend(
+        [
+            raid_candidate(raid_bar),
+            ConceptCandidate(
+                candidate_id="m15-structure-break",
+                candidate_type=CandidateType.STRUCTURE_BREAK,
+                symbol="XAUUSD",
+                timeframe=Timeframe.M15,
+                direction=Direction.BULLISH,
+                occurred_at=shift_bar.open_time,
+                available_at=shift_bar.close_time,
+                evidence_fact_ids=[],
+                raw_features={
+                    "reference_fact_id": "m15-swing-high",
+                    "same_timeframe_structure_eligible": True,
+                    "effective_rank_as_of_break": SwingRank.INTERMEDIATE.value,
+                },
+            ),
+            ConceptCandidate(
+                candidate_id="m5-displacement",
+                candidate_type=CandidateType.DISPLACEMENT,
+                symbol="XAUUSD",
+                timeframe=Timeframe.M5,
+                direction=Direction.BULLISH,
+                occurred_at=entry_bar.open_time,
+                available_at=entry_bar.close_time,
+            ),
+        ]
+    )
+    setups = SetupStore()
+    m3 = M3SetupPipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        setup_store=setups,
+        tick_size=0.1,
+    )
+
+    m3.process_latest(timeframe=Timeframe.M5, as_of=raid_bar.close_time)
+    shift_batch = m3.process_latest(timeframe=Timeframe.M15, as_of=shift_bar.close_time)
+    entry_batch = m3.process_latest(timeframe=Timeframe.M5, as_of=entry_bar.close_time)
+
+    m15_setup = next(
+        item
+        for item in setups.visible(as_of=entry_bar.close_time)
+        if item.setup_timeframe == Timeframe.M15
+    )
+    assert m15_setup.status is SetupStatus.FORMING
+    assert m15_setup.entry_timeframe == Timeframe.M5
+    assert len(m15_setup.entry_zone_candidate_ids) == 1
+    assert any(
+        item.candidate_type == CandidateType.SHIFT for item in shift_batch.candidates
+    )
+    assert entry_batch.candidates[0].timeframe == Timeframe.M5
+    shift = next(
+        item
+        for item in candidates.visible(as_of=entry_bar.close_time)
+        if item.candidate_type == CandidateType.SHIFT
+    )
+    assert shift.raw_features["effective_rank_as_of_break"] == "intermediate"
+
+
+def test_promoted_ith_rank_is_resolved_on_price_break() -> None:
+    bars = [
+        OHLCBar(
+            symbol="XAUUSD",
+            timeframe=Timeframe.M15,
+            open_time=T0 + timedelta(minutes=15 * index),
+            close_time=T0 + timedelta(minutes=15 * (index + 1)),
+            open=103.0,
+            high=106.0 if index == 3 else 104.0,
+            low=102.0,
+            close=105.5 if index == 3 else 103.0,
+        )
+        for index in range(4)
+    ]
+    feed = ClosedBarFeed("XAUUSD")
+    for item in bars:
+        feed.append(item, observed_at=item.close_time)
+    swing = reference_fact(
+        fact_id="m15-promoted-high",
+        fact_type=FactType.SWING_POINT,
+        timeframe=Timeframe.M15,
+        side="high",
+        price=105.0,
+    )
+    promotion = ObservableFact(
+        fact_id="m15-promoted-high-ith",
+        fact_type=FactType.SWING_PROMOTION,
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        occurred_at=swing.occurred_at,
+        confirmed_at=swing.confirmed_at,
+        available_at=swing.available_at,
+        geometry=PriceGeometry(price=105.0),
+        source_fact_ids=[swing.fact_id],
+        metrics={
+            "side": "high",
+            "rank": SwingRank.INTERMEDIATE.value,
+            "promoted_swing_fact_id": swing.fact_id,
+        },
+        detector_name="fixture",
+        detector_version="0.1.0",
+    )
+    facts = FactStore()
+    facts.extend([swing, promotion])
+    candidates = CandidateStore()
+    M2PrimitivePipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        tick_size=0.1,
+        candle_config=CandleFeatureConfig(baseline_period=3),
+    ).process_latest(timeframe=Timeframe.M15, as_of=bars[-1].close_time)
+    structure = next(
+        item
+        for item in candidates.visible(as_of=bars[-1].close_time)
+        if item.candidate_type == CandidateType.STRUCTURE_BREAK
+    )
+    assert structure.raw_features["effective_rank_as_of_break"] == "intermediate"
+
+
+def test_fvg_touch_on_bar_a_can_react_on_bar_b() -> None:
+    bars = ready_bars()[:6] + [
+        bar(6, open_=104.5, high=105.0, low=102.5, close=102.8),
+        bar(7, open_=103.2, high=104.0, low=103.2, close=103.5),
+    ]
+    _, facts, _, setups = run_sequence(bars)
+    setup = setups.visible(as_of=bars[-1].close_time)[0]
+    lifecycle = [
+        fact.metrics["lifecycle"]
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.FVG_REACTION
+    ]
+    assert lifecycle == ["touched", "reacted"]
+    reacted = next(
+        fact
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.FVG_REACTION
+        and fact.metrics["lifecycle"] == "reacted"
+    )
+    assert reacted.metrics["reaction_lag_bars"] == 1
+    assert reacted.metrics["touched"] is False
+    assert setup.status is SetupStatus.READY_FOR_LLM
+
+
+def test_fvg_close_through_far_edge_fails_before_reaction() -> None:
+    bars = ready_bars()[:6] + [
+        bar(6, open_=104.5, high=105.0, low=101.0, close=101.5),
+    ]
+    _, facts, _, setups = run_sequence(bars)
+    setup = setups.visible(as_of=bars[-1].close_time)[0]
+    failed = next(
+        fact
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.FVG_REACTION
+    )
+    assert failed.metrics["lifecycle"] == "failed"
+    assert failed.metrics["fully_failed"] is True
+    assert setup.status is SetupStatus.EXPIRED
+    assert setups.transitions(setup.setup_candidate_id)[-1].reason_codes == [
+        "ALL_ENTRY_ZONES_FAILED"
+    ]
+
+
+@pytest.mark.parametrize("late_by", [1, 2, 3])
+def test_shift_one_to_three_bars_after_expiry_is_research_logged(
+    late_by: int,
+) -> None:
+    policy = M3Policy(
+        setup_timeframes=(Timeframe.M5,),
+        shift_window_bars={Timeframe.M5: 1, Timeframe.M15: 8, Timeframe.H1: 4},
+        fvg_expiry_bars={Timeframe.M5: 24, Timeframe.M15: 16, Timeframe.H1: 6},
+    )
+    bars = ready_bars()[:4] + [
+        bar(4 + index, open_=101.0, high=103.0, low=100.5, close=102.0)
+        for index in range(late_by)
+    ]
+    final_index = 4 + late_by
+    bars.append(bar(final_index, open_=102.0, high=105.5, low=101.5, close=105.0))
+    _, facts, _, setups = run_sequence(bars, policy=policy)
+    setup = setups.visible(as_of=bars[-1].close_time)[0]
+    assert setup.status is SetupStatus.EXPIRED
+    late = [
+        fact
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.RESEARCH_OBSERVATION
+        and fact.metrics["reason_code"] == "LATE_SHIFT_AFTER_TERMINAL"
+    ]
+    assert len(late) == 1
+    assert late[0].metrics["bars_after_terminal"] == late_by
+
+
+def test_retrace_after_configured_fvg_window_is_research_logged() -> None:
+    policy = M3Policy(
+        setup_timeframes=(Timeframe.M5,),
+        shift_window_bars={Timeframe.M5: 12, Timeframe.M15: 8, Timeframe.H1: 4},
+        fvg_expiry_bars={Timeframe.M5: 2, Timeframe.M15: 16, Timeframe.H1: 6},
+    )
+    bars = ready_bars()[:6] + [
+        bar(6, open_=105.0, high=106.0, low=104.0, close=105.0),
+        bar(7, open_=105.0, high=106.0, low=104.0, close=105.0),
+        bar(8, open_=104.0, high=105.0, low=102.5, close=104.0),
+    ]
+    _, facts, _, setups = run_sequence(bars, policy=policy)
+    setup = setups.visible(as_of=bars[-1].close_time)[0]
+    assert setup.status is SetupStatus.EXPIRED
+    late = [
+        fact
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.RESEARCH_OBSERVATION
+        and fact.metrics["reason_code"] == "LATE_RETRACE_AFTER_TERMINAL"
+    ]
+    assert len(late) == 1
+    assert late[0].metrics["bars_after_terminal"] == 1
+
+
+def test_fvg_after_link_window_is_research_logged() -> None:
+    policy = M3Policy(
+        setup_timeframes=(Timeframe.M5,),
+        repricing_max_lag_bars=0,
+        shift_window_bars={Timeframe.M5: 12, Timeframe.M15: 8, Timeframe.H1: 4},
+        fvg_expiry_bars={Timeframe.M5: 24, Timeframe.M15: 16, Timeframe.H1: 6},
+    )
+    bars = ready_bars()[:4] + [
+        # Small close-through creates SHIFT without a displacement/FVG.
+        bar(4, open_=103.9, high=104.3, low=103.8, close=104.1),
+        # Repricing starts after the zero-lag link window has expired.
+        bar(5, open_=104.1, high=106.0, low=101.5, close=105.8),
+        # This bar confirms the bullish FVG whose middle candle is bar 5.
+        bar(6, open_=105.8, high=107.0, low=105.0, close=106.5),
+    ]
+    _, facts, _, setups = run_sequence(bars, policy=policy)
+    setup = setups.visible(as_of=bars[-1].close_time)[0]
+    assert setup.status is SetupStatus.EXPIRED
+    late = [
+        fact
+        for fact in facts.visible(as_of=bars[-1].close_time)
+        if fact.fact_type == FactType.RESEARCH_OBSERVATION
+        and fact.metrics["reason_code"] == "LATE_FVG_AFTER_TERMINAL"
+    ]
+    assert len(late) == 1
+    assert late[0].metrics["bars_after_terminal"] == 1

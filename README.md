@@ -35,8 +35,10 @@ facts, timestamps, geometry, position sizing, or risk checks.
 - Market-calendar-aware adjacency for explicit weekend/maintenance closures.
 - Single-use reference lifecycle plus range replay and restart catch-up APIs.
 - Traceable semantic decisions and a typed v0 close-acceptance contract.
-- Append-only M3 raid episodes and setup transitions through same-timeframe
-  shift, linked repricing/FVG, reaction, readiness, invalidation, or expiry.
+- Global append-only raid episodes with independent H1/M15 setup paths, M5
+  entry evidence, and setup-timeframe invalidation.
+- Stateful FVG entry zones (`FRESH -> TOUCHED -> REACTED/FAILED/EXPIRED`) and
+  post-terminal near-miss observation for replay calibration.
 - Independent liquidity/structure lifecycle, cross-timeframe provenance, and
   append-only swing hierarchy promotions.
 - Traceable `ReadyForLLMPayload` snapshots containing raw evidence, targets,
@@ -61,10 +63,11 @@ The v0 close-acceptance default is now frozen as one setup-timeframe close with
 zero buffer; its alternative calibrations remain research rather than runtime
 ambiguity. See `OPEN_QUESTIONS.md` for the complete status register.
 
-`build_exness_xauusd_intraday_v0()` freezes Exness candle timestamps and D1
-boundaries to UTC for M3; New York session clocks remain separate.
-Structural relevance is assigned by the semantic evaluator rather than a
-hard-coded swing rank.
+`build_exness_xauusd_intraday_v0()` interprets Exness timestamps as UTC and
+uses completed source D1 candles for PDH/PDL; it does not invent a UTC-midnight
+or New-York trading day. New York/DST-aware session clocks remain separate.
+Structural relevance is assigned by the semantic evaluator, while each break
+records the effective STH/ITH/LTH rank known at break time.
 
 ## Development
 

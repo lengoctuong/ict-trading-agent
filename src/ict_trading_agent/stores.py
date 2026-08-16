@@ -4,7 +4,12 @@ from collections.abc import Iterable
 
 from pydantic import AwareDatetime
 
-from .candidates import ConceptCandidate, SetupCandidate
+from .candidates import (
+    ConceptCandidate,
+    RaidEpisode,
+    RaidEpisodeUpdate,
+    SetupCandidate,
+)
 from .enums import CandidateType, FactType, Timeframe
 from .facts import ObservableFact
 from .lifecycle import SetupTransition, assert_setup_transition
@@ -106,6 +111,117 @@ class CandidateStore:
         }
 
 
+class RaidEpisodeStore:
+    """Append-only raid origins and cross-timeframe observation updates."""
+
+    def __init__(self) -> None:
+        self._episodes: dict[str, RaidEpisode] = {}
+        self._updates: dict[str, RaidEpisodeUpdate] = {}
+
+    def append_episode(self, episode: RaidEpisode) -> None:
+        if episode.raid_episode_id in self._episodes:
+            raise DuplicateRecordError(
+                f"duplicate raid_episode_id: {episode.raid_episode_id}"
+            )
+        self._episodes[episode.raid_episode_id] = episode.model_copy(deep=True)
+
+    def append_update(self, update: RaidEpisodeUpdate) -> None:
+        if update.update_id in self._updates:
+            raise DuplicateRecordError(f"duplicate raid update: {update.update_id}")
+        current = self.current(update.raid_episode_id)
+        if update.available_at < current.available_at:
+            raise ValueError("raid updates must be appended in availability order")
+        self._updates[update.update_id] = update.model_copy(deep=True)
+
+    def current(
+        self,
+        raid_episode_id: str,
+        *,
+        as_of: AwareDatetime | None = None,
+    ) -> RaidEpisode:
+        episode = self._episodes[raid_episode_id].model_copy(deep=True)
+        raid_ids = list(episode.raid_candidate_ids)
+        observation_ids = list(episode.observation_fact_ids)
+        timeframes = list(episode.observed_timeframes)
+        available_at = episode.available_at
+        extreme = episode.extreme
+        updates = sorted(
+            (
+                item
+                for item in self._updates.values()
+                if item.raid_episode_id == raid_episode_id
+                and (as_of is None or item.available_at <= as_of)
+            ),
+            key=lambda item: (item.available_at, item.update_id),
+        )
+        for update in updates:
+            available_at = update.available_at
+            observation_ids.append(update.observation_fact_id)
+            timeframes.append(update.observation_timeframe)
+            if update.raid_candidate_id is not None:
+                raid_ids.append(update.raid_candidate_id)
+            extreme = (
+                min(extreme, update.extreme)
+                if episode.direction.value == "bullish"
+                else max(extreme, update.extreme)
+            )
+        return episode.model_copy(
+            update={
+                "available_at": available_at,
+                "raid_candidate_ids": list(dict.fromkeys(raid_ids)),
+                "observation_fact_ids": list(dict.fromkeys(observation_ids)),
+                "observed_timeframes": list(dict.fromkeys(timeframes)),
+                "extreme": extreme,
+            },
+            deep=True,
+        )
+
+    def by_reference(
+        self,
+        reference_fact_id: str,
+        *,
+        as_of: AwareDatetime,
+    ) -> RaidEpisode | None:
+        return next(
+            (
+                self.current(episode_id, as_of=as_of)
+                for episode_id, origin in self._episodes.items()
+                if origin.reference_fact_id == reference_fact_id
+                and origin.available_at <= as_of
+            ),
+            None,
+        )
+
+    def visible(
+        self,
+        *,
+        as_of: AwareDatetime,
+        symbol: str | None = None,
+    ) -> tuple[RaidEpisode, ...]:
+        episodes = (
+            self.current(episode_id, as_of=as_of)
+            for episode_id, origin in self._episodes.items()
+            if origin.available_at <= as_of
+            and (symbol is None or origin.symbol == symbol)
+        )
+        return tuple(
+            sorted(episodes, key=lambda item: (item.available_at, item.raid_episode_id))
+        )
+
+    def updates(self, raid_episode_id: str) -> tuple[RaidEpisodeUpdate, ...]:
+        return tuple(
+            item.model_copy(deep=True)
+            for item in sorted(
+                (
+                    update
+                    for update in self._updates.values()
+                    if update.raid_episode_id == raid_episode_id
+                ),
+                key=lambda item: (item.available_at, item.update_id),
+            )
+        )
+
+
 class SetupStore:
     """Append-only setup origins and transition events with reconstructed views."""
 
@@ -160,6 +276,7 @@ class SetupStore:
         status = setup.status
         available_at = setup.available_at
         expires_at = setup.expires_at
+        hard_invalidation_price = setup.hard_invalidation_price
         for transition in self.transitions(setup_candidate_id):
             if as_of is not None and transition.available_at > as_of:
                 continue
@@ -173,6 +290,8 @@ class SetupStore:
             metrics.update(transition.metrics)
             if transition.expires_at is not None:
                 expires_at = transition.expires_at
+            if transition.hard_invalidation_price is not None:
+                hard_invalidation_price = transition.hard_invalidation_price
         return setup.model_copy(
             update={
                 "status": status,
@@ -181,6 +300,7 @@ class SetupStore:
                 "evidence_fact_ids": list(dict.fromkeys(fact_ids)),
                 "entry_zone_candidate_ids": list(dict.fromkeys(zone_ids)),
                 "expires_at": expires_at,
+                "hard_invalidation_price": hard_invalidation_price,
                 "metrics": metrics,
             },
             deep=True,

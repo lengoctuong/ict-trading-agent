@@ -452,14 +452,15 @@ def test_reference_reuse_requires_explicit_policy() -> None:
         )
         is False
     )
+    # The first take is global; another detection timeframe may observe the
+    # episode but cannot make the underlying reference eligible again.
     assert (
         default_tracker.is_eligible(
             reference.reference_fact_id,
             history,
             as_of=interacting_bar.close_time,
-            detection_timeframe=Timeframe.M15,
         )
-        is True
+        is False
     )
 
     reuse_tracker = ReferenceLifecycleTracker(

@@ -60,6 +60,8 @@ have bounded roles and must pass point-in-time replay tests before adoption.
 - The locally frozen M3 adaptation and research windows are retained in
   `chat_web/M3-plan.md`, captured from the planner share at
   <https://chatgpt.com/share/6a81f8a0-39e0-83ec-9a96-e752c1d84802>.
+- The M3.1 architecture review and mandatory regression cases are retained in
+  `chat_web/M3-feedback.md`.
 
 ## M2 adoption decisions
 

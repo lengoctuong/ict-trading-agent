@@ -41,23 +41,26 @@ Status: implemented; concrete broker closure calendar remains open.
 
 ## M3 — Setup state machine
 
-Status: implemented with causal synthetic fixtures; research windows remain
-versioned calibration parameters for M4.
+Status: M3.1 implemented with causal single- and multi-timeframe fixtures;
+research windows remain versioned calibration parameters for M4.
 
 ```text
 IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 ```
 
-- FVG touch/penetration/reaction facts.
+- Global first-take liquidity lifecycle and append-only cross-TF RaidEpisode.
+- Independent H1/M15 setup paths, M5 entry evidence, and setup-TF invalidation.
+- Stateful FVG touch/reaction/failure/expiry facts with multi-bar confirmation.
 - Deterministic invalidation/expiry policies.
 - Structured READY_FOR_LLM JSON output.
 - Independent liquidity and structural-reference lifecycle.
 - Detection/reference timeframe provenance and same-TF shift eligibility.
 - Append-only STH/STL -> ITH/ITL -> LTH/LTL promotions.
+- Effective swing rank resolved into PRICE_BREAK and SHIFT evidence as-of break.
 - Canonical same-bar and permissive <=3-bar reclaim episodes.
 - Raid-to-shift windows M5/M15/H1 = 12/8/4 tradable bars.
 - Causal shift/repricing/FVG linkage and FVG expiry 24/16/6 bars.
-- Append-only setup transitions and reason-coded near-miss observations.
+- Append-only setup transitions and post-terminal 32/64-bar research observer.
 
 ## M4 — Replay/backtest harness
 

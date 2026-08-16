@@ -1,4 +1,10 @@
-from .candidates import ConceptCandidate, SetupCandidate, TargetCandidate
+from .candidates import (
+    ConceptCandidate,
+    RaidEpisode,
+    RaidEpisodeUpdate,
+    SetupCandidate,
+    TargetCandidate,
+)
 from .config import (
     ConceptSpec,
     ConceptUsageSpec,
@@ -57,9 +63,15 @@ from .safety import (
 from .semantics import CandidateAssessment, SemanticAssessment, SetupSemanticDecision
 from .sessions import SessionSchedule, SessionWindow
 from .state import MarketState, TemporalContext, TimeframeState
-from .stores import CandidateStore, DuplicateRecordError, FactStore, SetupStore
+from .stores import (
+    CandidateStore,
+    DuplicateRecordError,
+    FactStore,
+    RaidEpisodeStore,
+    SetupStore,
+)
 from .structure_lifecycle import StructureLifecycleTracker
-from .swing_hierarchy import SwingHierarchyPromoter
+from .swing_hierarchy import SwingHierarchyPromoter, effective_swing_rank
 
 __all__ = [
     "ALLOWED_SETUP_TRANSITIONS",
@@ -94,6 +106,9 @@ __all__ = [
     "ObservableFact",
     "ParameterSpec",
     "PriceGeometry",
+    "RaidEpisode",
+    "RaidEpisodeStore",
+    "RaidEpisodeUpdate",
     "ReadyForLLMPayload",
     "ReferenceFactBuilder",
     "ReferenceLifecyclePolicy",
@@ -126,4 +141,5 @@ __all__ = [
     "build_v0_close_acceptance_policy",
     "build_xauusd_intraday_v0",
     "can_transition_setup",
+    "effective_swing_rank",
 ]

@@ -90,6 +90,7 @@ class FactType(str, Enum):
     REFERENCE_STATE = "reference_state"
     STRUCTURE_STATE = "structure_state"
     FVG_REACTION = "fvg_reaction"
+    RAID_OBSERVATION = "raid_observation"
     RESEARCH_OBSERVATION = "research_observation"
 
 
@@ -245,3 +246,5 @@ class FvgLifecycle(str, Enum):
     CE_REACHED = "ce_reached"
     FULLY_FILLED = "fully_filled"
     REACTED = "reacted"
+    FAILED = "failed"
+    EXPIRED = "expired"
