@@ -13,7 +13,6 @@ from .common import (
     stable_fact_id,
 )
 
-
 REFERENCE_FACT_TYPES = {
     FactType.SWING_POINT,
     FactType.SESSION_LEVEL,

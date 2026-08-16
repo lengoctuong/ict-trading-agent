@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import pairwise
+from statistics import median
 
 from pydantic import Field
 
@@ -8,7 +10,7 @@ from ..base import SchemaModel
 from ..candidates import ConceptCandidate
 from ..enums import CandidateType, Direction, FactType
 from ..facts import ObservableFact
-from ..market import OHLCBar, bars_are_contiguous
+from ..market import BarAdjacencyPolicy, OHLCBar, bars_are_contiguous
 from .common import stable_candidate_id, stable_fact_id
 
 
@@ -29,8 +31,14 @@ class CandleFeatureDetector:
     name = "CandleFeatureDetector"
     version = "0.1.0"
 
-    def __init__(self, config: CandleFeatureConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: CandleFeatureConfig | None = None,
+        *,
+        adjacency_policy: BarAdjacencyPolicy | None = None,
+    ) -> None:
         self.config = config or CandleFeatureConfig()
+        self.adjacency_policy = adjacency_policy
 
     def detect(
         self,
@@ -51,8 +59,8 @@ class CandleFeatureDetector:
         ):
             raise ValueError("candle feature baseline must use one symbol/timeframe")
         if any(
-            not bars_are_contiguous(left, right)
-            for left, right in zip(chain, chain[1:])
+            not bars_are_contiguous(left, right, self.adjacency_policy)
+            for left, right in pairwise(chain)
         ):
             raise ValueError("candle feature baseline must be contiguous")
 
@@ -60,9 +68,12 @@ class CandleFeatureDetector:
         body = abs(bar.close - bar.open)
         upper_wick = bar.high - max(bar.open, bar.close)
         lower_wick = min(bar.open, bar.close) - bar.low
-        average_body = sum(abs(item.close - item.open) for item in baseline) / len(
-            baseline
-        )
+        baseline_bodies = [abs(item.close - item.open) for item in baseline]
+        baseline_ranges = [item.high - item.low for item in baseline]
+        mean_body = sum(baseline_bodies) / len(baseline_bodies)
+        median_body = median(baseline_bodies)
+        mean_range = sum(baseline_ranges) / len(baseline_ranges)
+        median_range = median(baseline_ranges)
 
         true_ranges: list[float] = []
         previous_close: float | None = None
@@ -121,8 +132,13 @@ class CandleFeatureDetector:
                 "lower_wick_to_range": ratio(lower_wick, candle_range),
                 "opposing_wick_to_range": ratio(opposing_wick, candle_range),
                 "close_location": close_location,
-                "average_body_baseline": average_body,
-                "body_vs_baseline": ratio(body, average_body),
+                "mean_body": mean_body,
+                "median_body": median_body,
+                "mean_range": mean_range,
+                "median_range": median_range,
+                "atr": baseline_atr,
+                "average_body_baseline": mean_body,
+                "body_vs_baseline": ratio(body, mean_body),
                 "atr_baseline": baseline_atr,
                 "range_vs_atr": ratio(candle_range, baseline_atr),
                 "baseline_period": self.config.baseline_period,
@@ -161,8 +177,7 @@ class DisplacementCandidateDetector:
             <= self.thresholds.max_opposing_wick_to_range,
             "directional_close": directional_close_ok,
         }
-        if not all(criteria.values()):
-            return None
+        all_thresholds_passed = all(criteria.values())
 
         return ConceptCandidate(
             candidate_id=stable_candidate_id(
@@ -179,7 +194,8 @@ class DisplacementCandidateDetector:
             raw_features={
                 **metrics,
                 "criteria": criteria,
+                "all_thresholds_passed": all_thresholds_passed,
                 "thresholds": self.thresholds.model_dump(mode="json"),
             },
-            machine_labels=["parametric_displacement_candidate"],
+            machine_labels=["directional_repricing_candidate"],
         )

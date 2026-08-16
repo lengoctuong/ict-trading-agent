@@ -18,31 +18,51 @@ from .config import (
 from .decisions import TradeDecision
 from .enums import *
 from .facts import ObservableFact, PriceGeometry
-from .market import ClosedBarFeed, OHLCBar, bars_are_contiguous
-from .pipeline import M2DetectionBatch, M2PrimitivePipeline
 from .lifecycle import (
     ALLOWED_SETUP_TRANSITIONS,
     assert_setup_transition,
     can_transition_setup,
 )
+from .market import (
+    BarAdjacencyPolicy,
+    ClosedBarFeed,
+    ExplicitClosureCalendar,
+    MarketClosure,
+    MarketSequenceAdjacencyPolicy,
+    OHLCBar,
+    WallClockAdjacencyPolicy,
+    bars_are_contiguous,
+)
+from .pipeline import M2DetectionBatch, M2PrimitivePipeline
 from .presets import CORE_CONCEPT_SPECS
-from .safety import HardInvalidationRule, SafetyAssessment
+from .reducer import MarketStateReducer
+from .reference_lifecycle import (
+    ReferenceLifecyclePolicy,
+    ReferenceLifecycleTracker,
+)
 from .references import (
     CompletedSessionRange,
     CompletedTradingDay,
     ReferenceFactBuilder,
 )
-from .reducer import MarketStateReducer
-from .sessions import SessionSchedule, SessionWindow
+from .safety import (
+    CloseAcceptancePolicy,
+    HardInvalidationRule,
+    SafetyAssessment,
+    build_v0_close_acceptance_policy,
+)
 from .semantics import CandidateAssessment, SemanticAssessment, SetupSemanticDecision
+from .sessions import SessionSchedule, SessionWindow
 from .state import MarketState, TemporalContext, TimeframeState
 from .stores import CandidateStore, DuplicateRecordError, FactStore
 
 __all__ = [
     "ALLOWED_SETUP_TRANSITIONS",
     "CORE_CONCEPT_SPECS",
+    "BarAdjacencyPolicy",
     "CandidateAssessment",
     "CandidateStore",
+    "CloseAcceptancePolicy",
     "ClosedBarFeed",
     "CompletedSessionRange",
     "CompletedTradingDay",
@@ -50,23 +70,30 @@ __all__ = [
     "ConceptSpec",
     "ConceptUsageSpec",
     "CriterionSpec",
+    "DuplicateRecordError",
+    "ExplicitClosureCalendar",
+    "FactStore",
     "HardInvalidationRule",
     "HoldingPolicy",
     "KnowledgeReference",
-    "MarketState",
-    "MarketStateReducer",
     "M2DetectionBatch",
     "M2PrimitivePipeline",
+    "MarketClosure",
+    "MarketSequenceAdjacencyPolicy",
+    "MarketState",
+    "MarketStateReducer",
     "OHLCBar",
     "ObservableFact",
     "ParameterSpec",
     "PriceGeometry",
     "ReferenceFactBuilder",
+    "ReferenceLifecyclePolicy",
+    "ReferenceLifecycleTracker",
     "SafetyAssessment",
     "SemanticAssessment",
     "SessionConfig",
-    "SessionSchedule",
     "SessionPolicy",
+    "SessionSchedule",
     "SessionWindow",
     "SetupCandidate",
     "SetupRuleSpec",
@@ -79,10 +106,10 @@ __all__ = [
     "TradeDecision",
     "TradingDayPolicy",
     "TradingProfile",
-    "DuplicateRecordError",
-    "FactStore",
+    "WallClockAdjacencyPolicy",
     "assert_setup_transition",
-    "build_xauusd_intraday_v0",
     "bars_are_contiguous",
+    "build_v0_close_acceptance_policy",
+    "build_xauusd_intraday_v0",
     "can_transition_setup",
 ]

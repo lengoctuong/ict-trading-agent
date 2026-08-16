@@ -5,7 +5,11 @@ from datetime import datetime, time, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from ict_trading_agent.candidates import ConceptCandidate, SetupCandidate, TargetCandidate
+from ict_trading_agent.candidates import (
+    ConceptCandidate,
+    SetupCandidate,
+    TargetCandidate,
+)
 from ict_trading_agent.config import (
     ConceptUsageSpec,
     SetupRuleSpec,
@@ -33,14 +37,16 @@ from ict_trading_agent.enums import (
 from ict_trading_agent.facts import ObservableFact, PriceGeometry
 from ict_trading_agent.lifecycle import assert_setup_transition, can_transition_setup
 from ict_trading_agent.presets import CORE_CONCEPT_SPECS, FVG_SPEC, SWING_POINT_SPEC
-from ict_trading_agent.safety import SafetyAssessment
+from ict_trading_agent.safety import (
+    SafetyAssessment,
+    build_v0_close_acceptance_policy,
+)
 from ict_trading_agent.semantics import (
     CandidateAssessment,
     SemanticAssessment,
     SetupSemanticDecision,
 )
 from ict_trading_agent.state import MarketState, TemporalContext, TimeframeState
-
 
 T0 = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
 
@@ -202,6 +208,7 @@ def test_trade_decision_requires_safety_and_directional_prices() -> None:
         symbol="XAUUSD",
         created_at=T0,
         setup_candidate_id="setup-1",
+        semantic_decision_id="semantic-decision-1",
         action=TradeAction.LONG,
         entry_price=3340.0,
         stop_loss=3335.0,
@@ -217,6 +224,12 @@ def test_trade_decision_requires_safety_and_directional_prices() -> None:
         TradeDecision(safety_passed=True, **(payload | {"stop_loss": 3345.0}))
     decision = TradeDecision(safety_passed=True, **payload)
     assert decision.action is TradeAction.LONG
+    assert decision.semantic_decision_id == "semantic-decision-1"
+    with pytest.raises(ValidationError, match="semantic_assessment_id"):
+        TradeDecision(
+            safety_passed=True,
+            **(payload | {"semantic_assessment_id": "legacy-assessment"}),
+        )
 
 
 def test_xauusd_profile_preserves_frozen_roles_and_sessions() -> None:
@@ -287,6 +300,8 @@ def test_semantic_scores_are_bounded_without_becoming_probabilities() -> None:
     )
     assert assessment.overall_context_score == 0.77
     decision = SetupSemanticDecision(
+        decision_id="semantic-decision-1",
+        assessment_id=assessment.assessment_id,
         setup_candidate_id="setup-1",
         action=SemanticAction.ACCEPT,
         context_score=0.77,
@@ -299,6 +314,7 @@ def test_semantic_scores_are_bounded_without_becoming_probabilities() -> None:
         knowledge_version="knowledge-v0",
     )
     assert decision.input_state_hash == assessment.input_state_hash
+    assert decision.assessment_id == assessment.assessment_id
     with pytest.raises(ValidationError):
         CandidateAssessment(
             candidate_id="candidate-1",
@@ -376,3 +392,13 @@ def test_legacy_rule_scoring_fields_are_rejected() -> None:
             operator=RuleOperator.EXISTS,
             weight=0.2,
         )
+
+
+def test_v0_close_acceptance_uses_one_setup_timeframe_close() -> None:
+    policy = build_v0_close_acceptance_policy()
+    rule = policy.to_rule()
+    assert rule.parameters == {
+        "timeframe": "setup_timeframe",
+        "consecutive_closes": 1,
+        "distance_buffer": 0.0,
+    }

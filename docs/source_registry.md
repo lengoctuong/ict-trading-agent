@@ -4,6 +4,10 @@ Status: pinned for M2 research and implementation provenance.
 
 Reviewed: 2026-08-16.
 
+The M2.1 corrections and decision statuses are preserved in
+`chat_web/M2-feedback.md`; it is a project review input, not an additional ICT
+definition or detector authority.
+
 No single external source is authoritative for the complete system. Project
 contracts and approved decisions remain in `docs/spec_v0.md`; external sources
 have bounded roles and must pass point-in-time replay tests before adoption.
@@ -59,10 +63,11 @@ have bounded roles and must pass point-in-time replay tests before adoption.
 | Concern | Decision |
 |---|---|
 | Candle features | Store raw causal measurements at bar close. |
-| Displacement | Emit a permissive parametric candidate; thresholds are research configuration. |
+| Displacement | Emit every directional repricing candidate with per-threshold results; thresholds are research configuration, not a hard gate. |
 | Follow-through | Later append-only evidence, never backfilled into the original candle fact. |
 | Level breach | Strict tick-normalized excursion beyond a known reference. |
 | Canonical sweep | Same-bar breach plus close reclaim; wick fraction is a feature, not a v0 hard gate. |
 | Multi-bar sweep | Deferred pending an explicit maximum span and reclaim policy. |
+| Reference lifecycle | First breach appends `TAKEN`; default policy prevents later reuse while preserving history. |
 | Structure break | Close through an already-confirmed swing; initially unclassified. |
 | BOS/CHoCH/MSS | Do not hard-classify until structural-reference and temporal-link policies are frozen. |

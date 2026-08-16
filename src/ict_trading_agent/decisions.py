@@ -11,7 +11,7 @@ class TradeDecision(SchemaModel):
     symbol: NonEmptyStr
     created_at: AwareDatetime
     setup_candidate_id: NonEmptyStr
-    semantic_assessment_id: str | None = None
+    semantic_decision_id: NonEmptyStr | None = None
     action: TradeAction
     entry_price: float | None = Field(default=None, gt=0.0)
     stop_loss: float | None = Field(default=None, gt=0.0)
@@ -53,4 +53,3 @@ class TradeDecision(SchemaModel):
         ):
             raise ValueError("SHORT requires take_profit < entry_price < stop_loss")
         return self
-

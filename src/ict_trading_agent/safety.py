@@ -5,13 +5,44 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from .base import NonEmptyStr, SchemaModel
-from .enums import HardInvalidationRuleType
+from .enums import HardInvalidationRuleType, InvalidationTimeframeBasis
 
 
 class HardInvalidationRule(SchemaModel):
     rule_id: NonEmptyStr
     rule_type: HardInvalidationRuleType
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class CloseAcceptancePolicy(SchemaModel):
+    timeframe_basis: InvalidationTimeframeBasis = (
+        InvalidationTimeframeBasis.SETUP_TIMEFRAME
+    )
+    consecutive_closes: int = Field(default=1, ge=1)
+    distance_buffer: float = Field(default=0.0, ge=0.0)
+
+    def to_rule(
+        self,
+        *,
+        rule_id: str = "hard-invalidation.close-acceptance.v0",
+    ) -> HardInvalidationRule:
+        return HardInvalidationRule(
+            rule_id=rule_id,
+            rule_type=HardInvalidationRuleType.PRICE_CLOSE_BEYOND_LEVEL,
+            parameters={
+                "timeframe": self.timeframe_basis.value,
+                "consecutive_closes": self.consecutive_closes,
+                "distance_buffer": self.distance_buffer,
+            },
+        )
+
+
+def build_v0_close_acceptance_policy() -> CloseAcceptancePolicy:
+    return CloseAcceptancePolicy(
+        timeframe_basis=InvalidationTimeframeBasis.SETUP_TIMEFRAME,
+        consecutive_closes=1,
+        distance_buffer=0.0,
+    )
 
 
 class SafetyAssessment(SchemaModel):
@@ -32,4 +63,3 @@ class SafetyAssessment(SchemaModel):
         if self.passed and self.rejection_codes:
             raise ValueError("passed safety assessment cannot contain rejection codes")
         return self
-

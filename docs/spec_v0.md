@@ -86,6 +86,9 @@ Judas, macros, and other deferred concepts are out of scope.
    mutate what a past replay could see.
 8. Concept definitions are separate from detector implementations and
    provenance.
+9. "Consecutive" means consecutive tradable bars under an explicit data-source
+   calendar. Wall-clock equality is only the default when no closure intervenes;
+   unexplained gaps remain invalid.
 
 ## 5. Primitive semantics
 
@@ -105,15 +108,19 @@ Swing low:  L[n] < L[n-1] and L[n] < L[n+1]
 
 A confirmed swing/session/previous-day extreme can create a reference pool.
 Pool taken is a breach; a canonical same-bar sweep additionally requires close
-reclaim. Multi-bar raid/reclaim remains an experimental candidate detector.
+reclaim. The first breach appends a `TAKEN` lifecycle observation and makes the
+reference historical/ineligible under the default single-use policy. Reuse
+requires an explicit policy override. Multi-bar raid/reclaim remains deferred.
 
 ### Displacement
 
 Store raw features before semantic classification: body/range,
-body-vs-baseline, opposing wick/range, ATR-normalized range, and close location.
-The initial operational thresholds are research parameters, not universal ICT
-truth. Follow-through is later evidence and cannot be backfilled into the
-original state.
+body-vs-baseline, opposing wick/range, close location, ATR, and mean/median body
+and range baselines. Every directional candle may remain visible as a permissive
+repricing candidate with individual criterion results. Operational thresholds
+are research parameters, not hard evidence gates or universal ICT truth.
+Follow-through is later evidence and cannot be backfilled into the original
+state.
 
 ### FVG
 
@@ -162,8 +169,8 @@ position completion                             -> CLOSED
 
 Reference implementations suggest invalidating/discarding when structure is
 reclaimed, the target is hit before entry, the entry-zone/FVG opportunity
-fails, or the setup times out. Exact close-acceptance and expiry parameters
-remain configurable.
+fails, or the setup times out. Close acceptance uses the frozen v0 default;
+expiry remains configurable until its lifecycle policy is selected.
 
 An FVG reaction candidate should expose at least:
 
@@ -178,13 +185,19 @@ favorable_close_outside
 Every semantic output records model, optional model version, prompt version,
 optional temperature, input-state hash, creation timestamp, and optional
 knowledge version. Scores are ordinal/self-assessment values, never win
-probabilities.
+probabilities. `SetupSemanticDecision` has its own decision ID and references
+the broader semantic-assessment ID; `TradeDecision` references the semantic
+decision ID.
 
 ## 8. Safety contract
 
 Deterministic checks own data freshness, spread, entry/stop validity, RR, daily
 loss, exposure, position limits, trading-day validity, sizing, and execution.
 No LLM output can override a failed safety check.
+
+The v0 close-acceptance contract is one close on the setup timeframe beyond the
+invalidation level with zero distance buffer. Alternative counts/buffers are
+research configurations and must not change the recorded v0 default silently.
 
 ## 9. Reference-source roles
 
@@ -201,10 +214,10 @@ decision and a bounded role.
 ## 10. Remaining open policies
 
 - XAUUSD trading-day boundary for the selected data source/broker.
-- Structural-reference policy and semantic candidate window.
-- Close-acceptance invalidation formula.
+- Concrete broker/data-source market calendar and closure versioning.
+- Semantic candidate-window age, distance, timeframe, and count bounds.
 - Exact session windows and overlap policy.
 - Multi-bar sweep limits and MSS temporal matching window.
 - Per-timeframe/session displacement baseline and threshold calibration.
-- Reference-level lifecycle after a level is breached, reclaimed, or taken.
 - Equality/tolerance semantics for closes exactly on a reference level.
+- Immutable local freeze of every TradingView-derived M3 transition.

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import timedelta
+from typing import Protocol
 
 from pydantic import AwareDatetime, Field, model_validator
 
 from .base import NonEmptyStr, SchemaModel
 from .enums import Timeframe
-
 
 TIMEFRAME_DURATIONS: dict[Timeframe, timedelta] = {
     Timeframe.W1: timedelta(days=7),
@@ -50,11 +50,71 @@ class OHLCBar(SchemaModel):
         return self.close_time - self.open_time
 
 
-def bars_are_contiguous(left: OHLCBar, right: OHLCBar) -> bool:
+class BarAdjacencyPolicy(Protocol):
+    def are_adjacent(self, left: OHLCBar, right: OHLCBar) -> bool: ...
+
+
+class WallClockAdjacencyPolicy:
+    def are_adjacent(self, left: OHLCBar, right: OHLCBar) -> bool:
+        return left.close_time == right.open_time
+
+
+class MarketClosure(SchemaModel):
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    reason: NonEmptyStr
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "MarketClosure":
+        if self.end_at <= self.start_at:
+            raise ValueError("market closure end must be after start")
+        return self
+
+
+class ExplicitClosureCalendar(SchemaModel):
+    """Data-source calendar made of explicit weekend/maintenance closures."""
+
+    calendar_id: NonEmptyStr
+    closures: list[MarketClosure] = Field(default_factory=list)
+
+    def covers_gap(self, start_at: AwareDatetime, end_at: AwareDatetime) -> bool:
+        if end_at <= start_at:
+            return end_at == start_at
+        cursor = start_at
+        for closure in sorted(self.closures, key=lambda item: item.start_at):
+            if closure.end_at <= cursor:
+                continue
+            if closure.start_at > cursor:
+                return False
+            cursor = max(cursor, closure.end_at)
+            if cursor >= end_at:
+                return True
+        return False
+
+
+class MarketSequenceAdjacencyPolicy:
+    def __init__(self, calendar: ExplicitClosureCalendar) -> None:
+        self.calendar = calendar
+
+    def are_adjacent(self, left: OHLCBar, right: OHLCBar) -> bool:
+        if left.close_time > right.open_time:
+            return False
+        if left.close_time == right.open_time:
+            return True
+        return self.calendar.covers_gap(left.close_time, right.open_time)
+
+
+def bars_are_contiguous(
+    left: OHLCBar,
+    right: OHLCBar,
+    adjacency_policy: BarAdjacencyPolicy | None = None,
+) -> bool:
+    policy = adjacency_policy or WallClockAdjacencyPolicy()
     return (
         left.symbol == right.symbol
         and left.timeframe == right.timeframe
-        and left.close_time == right.open_time
+        and left.open_time < right.open_time
+        and policy.are_adjacent(left, right)
     )
 
 

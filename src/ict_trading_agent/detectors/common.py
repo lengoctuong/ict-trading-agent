@@ -1,23 +1,31 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from hashlib import sha256
 
-from ..market import OHLCBar, bars_are_contiguous
+from ..market import BarAdjacencyPolicy, OHLCBar, bars_are_contiguous
 
 
 def normalize_to_tick(value: float, tick_size: float) -> float:
     if tick_size <= 0:
         raise ValueError("tick_size must be positive")
     tick = Decimal(str(tick_size))
-    units = (Decimal(str(value)) / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    units = (Decimal(str(value)) / tick).quantize(Decimal(1), rounding=ROUND_HALF_UP)
     return float(units * tick)
 
 
-def validate_triplet(left: OHLCBar, middle: OHLCBar, right: OHLCBar) -> None:
+def validate_triplet(
+    left: OHLCBar,
+    middle: OHLCBar,
+    right: OHLCBar,
+    adjacency_policy: BarAdjacencyPolicy | None = None,
+) -> None:
     if not (left.is_closed and middle.is_closed and right.is_closed):
         raise ValueError("detectors only consume closed bars")
-    if not (bars_are_contiguous(left, middle) and bars_are_contiguous(middle, right)):
+    if not (
+        bars_are_contiguous(left, middle, adjacency_policy)
+        and bars_are_contiguous(middle, right, adjacency_policy)
+    ):
         raise ValueError("detector triplet must contain contiguous same-timeframe bars")
 
 

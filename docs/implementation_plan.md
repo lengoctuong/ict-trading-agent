@@ -28,6 +28,17 @@ Status: implemented and covered by causal synthetic fixtures.
 - Closed-bar pipeline that performs duplicate preflight before append-only batch
   writes.
 
+## M2.1 — Real-data and replay hardening
+
+Status: implemented; concrete broker calendar/trading-day presets remain open.
+
+- Market-calendar-aware bar adjacency with explicit versionable closures.
+- Mean/median body and range plus ATR raw baselines.
+- Permissive directional-repricing candidates with per-criterion results.
+- Append-only reference lifecycle; taken levels are single-use by default.
+- Shared per-bar path for realtime, range replay, and restart catch-up.
+- Explicit semantic-decision identity and setup-timeframe close-acceptance v0.
+
 ## M3 — Setup state machine
 
 Status: next milestone; transition policies remain subject to the open questions.

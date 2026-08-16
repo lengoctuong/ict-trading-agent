@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pydantic import AwareDatetime, Field
 
 from .base import NonEmptyStr, SchemaModel
@@ -19,7 +21,11 @@ from .detectors import (
 )
 from .enums import FactType, Timeframe
 from .facts import ObservableFact
-from .market import ClosedBarFeed
+from .market import BarAdjacencyPolicy, ClosedBarFeed, OHLCBar
+from .reference_lifecycle import (
+    ReferenceLifecyclePolicy,
+    ReferenceLifecycleTracker,
+)
 from .stores import CandidateStore, DuplicateRecordError, FactStore
 
 
@@ -44,18 +50,32 @@ class M2PrimitivePipeline:
         tick_size: float,
         candle_config: CandleFeatureConfig | None = None,
         displacement_thresholds: DisplacementThresholds | None = None,
+        adjacency_policy: BarAdjacencyPolicy | None = None,
+        reference_lifecycle_policy: ReferenceLifecyclePolicy | None = None,
     ) -> None:
         self.bar_feed = bar_feed
         self.fact_store = fact_store
         self.candidate_store = candidate_store
-        self.candle_features = CandleFeatureDetector(candle_config)
+        self.candle_features = CandleFeatureDetector(
+            candle_config,
+            adjacency_policy=adjacency_policy,
+        )
         self.displacement = DisplacementCandidateDetector(displacement_thresholds)
-        self.swings = ThreeBarSwingDetector(tick_size=tick_size)
-        self.fvgs = FVGGeometryDetector(tick_size=tick_size)
+        self.swings = ThreeBarSwingDetector(
+            tick_size=tick_size,
+            adjacency_policy=adjacency_policy,
+        )
+        self.fvgs = FVGGeometryDetector(
+            tick_size=tick_size,
+            adjacency_policy=adjacency_policy,
+        )
         self.level_interactions = LevelInteractionDetector(tick_size=tick_size)
         self.liquidity_raids = LiquidityRaidCandidateDetector()
         self.price_breaks = PriceBreakDetector(tick_size=tick_size)
         self.structure_breaks = StructureBreakCandidateDetector()
+        self.reference_lifecycle = ReferenceLifecycleTracker(
+            reference_lifecycle_policy
+        )
 
     def process_latest(
         self,
@@ -64,29 +84,84 @@ class M2PrimitivePipeline:
         as_of: AwareDatetime,
     ) -> M2DetectionBatch:
         bars = self.bar_feed.bars(timeframe, as_of=as_of)
-        baseline_period = self.candle_features.config.baseline_period
-        if len(bars) < max(3, baseline_period + 1):
+        minimum_index = self._minimum_processable_index()
+        if len(bars) <= minimum_index:
             raise ValueError("insufficient closed bars for the M2 pipeline")
+        return self._process_index(bars, len(bars) - 1)
 
-        bar = bars[-1]
-        baseline = bars[-(baseline_period + 1) : -1]
+    def process_range(
+        self,
+        *,
+        timeframe: Timeframe,
+        start_after: AwareDatetime | None,
+        as_of: AwareDatetime,
+    ) -> tuple[M2DetectionBatch, ...]:
+        """Process every eligible bar in order using the realtime code path."""
+
+        bars = self.bar_feed.bars(timeframe, as_of=as_of)
+        batches: list[M2DetectionBatch] = []
+        for index in range(self._minimum_processable_index(), len(bars)):
+            if start_after is not None and bars[index].open_time <= start_after:
+                continue
+            batches.append(self._process_index(bars, index))
+        return tuple(batches)
+
+    def catch_up(
+        self,
+        *,
+        timeframe: Timeframe,
+        as_of: AwareDatetime,
+    ) -> tuple[M2DetectionBatch, ...]:
+        """Resume after the last persisted candle-feature cursor."""
+
+        processed = self.fact_store.visible(
+            as_of=as_of,
+            symbol=self.bar_feed.symbol,
+            timeframe=timeframe,
+            fact_type=FactType.CANDLE_FEATURES,
+        )
+        last_processed = max(
+            (fact.occurred_at for fact in processed),
+            default=None,
+        )
+        return self.process_range(
+            timeframe=timeframe,
+            start_after=last_processed,
+            as_of=as_of,
+        )
+
+    def _minimum_processable_index(self) -> int:
+        return max(2, self.candle_features.config.baseline_period)
+
+    def _process_index(
+        self,
+        bars: Sequence[OHLCBar],
+        index: int,
+    ) -> M2DetectionBatch:
+        baseline_period = self.candle_features.config.baseline_period
+        if index < self._minimum_processable_index():
+            raise ValueError("bar does not have enough causal history")
+
+        bar = bars[index]
+        baseline = bars[index - baseline_period : index]
         facts: list[ObservableFact] = []
         candidates: list[ConceptCandidate] = []
 
-        facts.extend(self.swings.detect_triplet(*bars[-3:]))
-        facts.extend(self.fvgs.detect_triplet(*bars[-3:]))
+        facts.extend(self.swings.detect_triplet(*bars[index - 2 : index + 1]))
+        facts.extend(self.fvgs.detect_triplet(*bars[index - 2 : index + 1]))
         candle_fact = self.candle_features.detect(bar, baseline)
         facts.append(candle_fact)
         displacement = self.displacement.detect(candle_fact)
         if displacement is not None:
             candidates.append(displacement)
 
+        visible_at_open = self.fact_store.visible(
+            as_of=bar.open_time,
+            symbol=bar.symbol,
+        )
         reference_facts = [
             fact
-            for fact in self.fact_store.visible(
-                as_of=bar.open_time,
-                symbol=bar.symbol,
-            )
+            for fact in visible_at_open
             if fact.fact_type
             in {
                 FactType.SWING_POINT,
@@ -96,8 +171,21 @@ class M2PrimitivePipeline:
         ]
         for reference_fact in reference_facts:
             reference = ReferenceLevel.from_fact(reference_fact)
+            if not self.reference_lifecycle.is_eligible(
+                reference.reference_fact_id,
+                visible_at_open,
+                as_of=bar.open_time,
+            ):
+                continue
             interactions = self.level_interactions.detect(bar, reference)
             facts.extend(interactions)
+            if interactions:
+                facts.append(
+                    self.reference_lifecycle.taken_observation(
+                        reference,
+                        interactions[0],
+                    )
+                )
             if len(interactions) == 2:
                 candidates.append(
                     self.liquidity_raids.detect(interactions[0], interactions[1])
@@ -113,8 +201,8 @@ class M2PrimitivePipeline:
         self.candidate_store.extend(candidates)
         return M2DetectionBatch(
             symbol=bar.symbol,
-            timeframe=timeframe,
-            as_of=as_of,
+            timeframe=bar.timeframe,
+            as_of=bar.close_time,
             processed_bar_open_at=bar.open_time,
             facts=facts,
             candidates=candidates,

@@ -1,61 +1,74 @@
-# Open questions from the source specification
+# Decision and open-question register
 
-These items are intentionally not resolved by implementation convenience.
+This file records current status explicitly. `OPEN` needs a policy, external
+input, or research result; `RESOLVED` has an approved design; `IMPLEMENTED`
+means that design is enforced by code and tests.
 
-1. **Trading-day boundary (blocking the final production preset).** The design
-   requires a precise XAUUSD trading day, but does not choose broker day, UTC
-   calendar day, or New York 17:00 rollover. `TradingDayPolicy` is required.
+## Open / needs policy or calibration
 
-2. **Structural reference policy.** The design deliberately leaves open which
-   STH/ITH/LTH is relevant for a structure-break candidate and delegates
-   contextual relevance partly to the semantic evaluator. No hard-coded
-   reference selector is included.
+1. **Concrete XAUUSD trading day — OPEN; production/backtest blocker.**
+   `TradingDayPolicy` carries timezone and rollover configuration, but the
+   project still needs the selected broker/data-source definition and helpers
+   for trading-day ID, previous day, start, and end. Do not hard-code UTC,
+   broker midnight, or New York 17:00 before that choice.
 
-3. **Close acceptance.** Hard invalidation mentions "close acceptance beyond
-   the sweep extreme" but does not define bar count, timeframe, or distance.
-   `HardInvalidationRule.parameters` must carry the chosen policy later.
+2. **Concrete market calendar — OPEN; real-data blocker.** The code now
+   distinguishes wall-clock adjacency from market-sequence adjacency through
+   an explicit closure calendar. Weekend and maintenance closures must still be
+   supplied and versioned by the selected XAUUSD data source. An unexplained
+   gap remains a missing-bar error.
 
-4. **Semantic decision identity.** `TradeDecision` references a
-   `semantic_assessment_id`; `SemanticAssessment` has that ID, but
-   `SetupSemanticDecision` has no independent ID. The implementation does not
-   invent an additional reference field.
+3. **Session windows and overlap priority — OPEN.** Session names are frozen,
+   but exact local windows and the primary session during overlaps are not.
 
-5. **Session windows and overlap policy.** Session names are frozen, but exact
-   local start/end times and which session is primary during overlaps are not.
-   `SessionSchedule` therefore requires configured IANA-timezone windows and
-   an explicit priority when overlaps occur.
+4. **Multi-bar raid and MSS temporal matching — OPEN.** M2 supports the
+   canonical same-bar breach/reclaim. Maximum reclaim span and allowed timing
+   among raid, structural shift, displacement, and FVG remain research policy.
 
-6. **Multi-bar raid and MSS timing.** The canonical same-bar breach/reclaim is
-   defined, but the allowed multi-bar raid/reclaim span and the temporal link
-   between raid, structure shift, displacement, and FVG remain research
-   parameters.
+5. **Displacement calibration — OPEN, non-blocking research.** Directional
+   candles now remain visible as permissive candidates. Baseline length and
+   thresholds for body/range, body/baseline, wick, close location, ATR, and
+   robust median features still need calibration by timeframe and session.
 
-7. **Displacement calibration.** The causal feature set is frozen, but baseline
-   length and body/range, body/baseline, opposing-wick, and directional-close
-   thresholds have not been calibrated per XAUUSD timeframe/session. Current
-   defaults are explicit research parameters, not claims of universal validity.
+6. **Tick-boundary semantics — OPEN.** Strict tick-normalized comparisons mean
+   a close exactly on a breached level is neither reclaim nor close-through.
+   Equality/tolerance behavior must be selected for the actual price feed.
 
-8. **Reference-level lifecycle.** The source material does not define a single
-   mechanical policy for when a swept/taken swing, session level, or previous-
-   day level stops being eligible for later candidates. M2 leaves source facts
-   immutable and does not silently deactivate or reuse them by preference.
+7. **TradingView transition snapshot — OPEN before M3.** The selected script is
+   mutable and has no immutable commit. Every adopted RAID -> SHIFT ->
+   ENTRY_ZONE transition must be frozen locally in contracts and fixtures.
 
-9. **Tick-boundary close semantics.** M2 uses strict tick-normalized comparisons:
-   a close exactly on a breached level is neither a reclaim nor a close-through
-   break. Whether equality or a tolerance should count requires an explicit
-   instrument/data-source policy.
+8. **Candidate-window bounds — OPEN, operational calibration.** Structural
+   relevance belongs to the semantic evaluator, but deterministic limits for
+   age, distance, timeframe, and recent-candidate count are still needed before
+   sending MarketState to an LLM.
 
-10. **Mutable TradingView reference.** The selected TradingView publication has
-    no immutable commit and its live feature set has expanded beyond the original
-    Sweep -> MSS -> FVG flow. M3 must freeze every adopted transition in local
-    contracts/tests rather than depend on the current upstream script behavior.
+9. **Close-acceptance calibration — OPEN, non-blocking research.** The v0
+   default is implemented as one setup-timeframe close beyond the invalidation
+   level with zero distance buffer. Alternatives such as two closes or an ATR
+   buffer remain replay experiments, not runtime ambiguity.
 
-## Resolved by the updated planner transcript
+## Resolved and implemented
 
-- Session targets are generic `SESSION_HIGH` / `SESSION_LOW` records carrying
-  a concrete `session`, so NY PM needs no dedicated target enum.
-- Both semantic output schemas carry model/prompt provenance, input-state hash,
-  creation time, and optional model/temperature/knowledge versions.
-- `ConceptUsageSpec.scoring_feature` and `SetupRuleSpec.weight` were removed;
-  semantic scoring belongs to the LLM and deterministic code retains only
-  measurable rules and safety constraints.
+- **Structural reference relevance — RESOLVED.** Machine code exposes valid
+  confirmed swing-break candidates and keeps them `UNCLASSIFIED`; the semantic
+  evaluator decides which reference is contextually significant.
+- **Close acceptance v0 — IMPLEMENTED as a typed contract.** Setup timeframe,
+  one consecutive close, zero buffer. Enforcement belongs to the M3 lifecycle.
+- **Semantic decision identity — IMPLEMENTED.** `SetupSemanticDecision` has
+  `decision_id` and `assessment_id`; `TradeDecision` references
+  `semantic_decision_id`.
+- **Reference-level lifecycle — IMPLEMENTED.** Default policy is append-only
+  `ACTIVE -> TAKEN`, after which the level is historical and ineligible. Reuse
+  requires an explicit `ReferenceLifecyclePolicy` override.
+- **Displacement permissiveness — IMPLEMENTED.** Every directional candle can
+  produce a repricing candidate with individual threshold results; thresholds
+  do not erase evidence before semantic evaluation.
+- **Replay/restart catch-up — IMPLEMENTED.** `process_range()` and `catch_up()`
+  process every unseen closed bar through the same per-bar path as realtime.
+- **Generic session targets — IMPLEMENTED.** `SESSION_HIGH` / `SESSION_LOW`
+  carry a concrete Asia/London/NY AM/NY PM session.
+- **LLM provenance — IMPLEMENTED.** Model, versions, prompt, temperature,
+  input-state hash, creation time, and knowledge version are recorded.
+- **Legacy rule scoring — REMOVED.** `scoring_feature` and rule `weight` are not
+  active-path fields; semantic scoring belongs to the LLM.

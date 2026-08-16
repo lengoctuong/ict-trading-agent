@@ -86,6 +86,7 @@ class FactType(str, Enum):
     CANDLE_FEATURES = "candle_features"
     SESSION_LEVEL = "session_level"
     PREVIOUS_DAY_LEVEL = "previous_day_level"
+    REFERENCE_STATE = "reference_state"
 
 
 class CandidateType(str, Enum):
@@ -182,6 +183,10 @@ class HardInvalidationRuleType(str, Enum):
     TRADING_DAY_END = "trading_day_end"
 
 
+class InvalidationTimeframeBasis(str, Enum):
+    SETUP_TIMEFRAME = "setup_timeframe"
+
+
 class SwingSide(str, Enum):
     HIGH = "high"
     LOW = "low"
@@ -216,6 +221,11 @@ class StructureScope(str, Enum):
 class LiquiditySide(str, Enum):
     BUY_SIDE = "buy_side"
     SELL_SIDE = "sell_side"
+
+
+class ReferenceStatus(str, Enum):
+    ACTIVE = "active"
+    TAKEN = "taken"
 
 
 class FvgLifecycle(str, Enum):

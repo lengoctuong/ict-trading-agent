@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from ..enums import FactType, SwingRank, SwingSide
 from ..facts import ObservableFact, PriceGeometry
-from ..market import OHLCBar
+from ..market import BarAdjacencyPolicy, OHLCBar
 from .common import normalize_to_tick, stable_fact_id, validate_triplet
 
 
@@ -12,10 +12,16 @@ class ThreeBarSwingDetector:
     name = "ICTThreeBarSwingDetector"
     version = "0.1.0"
 
-    def __init__(self, *, tick_size: float) -> None:
+    def __init__(
+        self,
+        *,
+        tick_size: float,
+        adjacency_policy: BarAdjacencyPolicy | None = None,
+    ) -> None:
         if tick_size <= 0:
             raise ValueError("tick_size must be positive")
         self.tick_size = tick_size
+        self.adjacency_policy = adjacency_policy
 
     def detect_triplet(
         self,
@@ -23,7 +29,7 @@ class ThreeBarSwingDetector:
         middle: OHLCBar,
         right: OHLCBar,
     ) -> tuple[ObservableFact, ...]:
-        validate_triplet(left, middle, right)
+        validate_triplet(left, middle, right, self.adjacency_policy)
         left_high = normalize_to_tick(left.high, self.tick_size)
         middle_high = normalize_to_tick(middle.high, self.tick_size)
         right_high = normalize_to_tick(right.high, self.tick_size)
@@ -72,4 +78,3 @@ class ThreeBarSwingDetector:
             detector_name=self.name,
             detector_version=self.version,
         )
-

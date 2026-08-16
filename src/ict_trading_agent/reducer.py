@@ -7,6 +7,10 @@ from pydantic import AwareDatetime
 from .config import TradingProfile
 from .enums import CandidateType, FactType
 from .market import ClosedBarFeed
+from .reference_lifecycle import (
+    ReferenceLifecyclePolicy,
+    ReferenceLifecycleTracker,
+)
 from .state import MarketState, TemporalContext, TimeframeState
 from .stores import CandidateStore, FactStore
 
@@ -21,11 +25,15 @@ class MarketStateReducer:
         bar_feed: ClosedBarFeed,
         fact_store: FactStore,
         candidate_store: CandidateStore,
+        reference_lifecycle_policy: ReferenceLifecyclePolicy | None = None,
     ) -> None:
         self.profile = profile
         self.bar_feed = bar_feed
         self.fact_store = fact_store
         self.candidate_store = candidate_store
+        self.reference_lifecycle = ReferenceLifecycleTracker(
+            reference_lifecycle_policy
+        )
 
     def reduce(
         self,
@@ -56,6 +64,11 @@ class MarketStateReducer:
                     fact.fact_id
                     for fact in tf_facts
                     if fact.fact_type == FactType.SWING_POINT
+                    and self.reference_lifecycle.is_eligible(
+                        fact.fact_id,
+                        facts,
+                        as_of=as_of,
+                    )
                 ],
                 active_fvg_candidate_ids=[
                     candidate.candidate_id
@@ -100,4 +113,3 @@ class MarketStateReducer:
             self.candidate_store.as_mapping(),
         )
         return state
-

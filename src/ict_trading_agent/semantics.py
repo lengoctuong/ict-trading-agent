@@ -37,6 +37,8 @@ class SemanticAssessment(SchemaModel):
 
 
 class SetupSemanticDecision(SchemaModel):
+    decision_id: NonEmptyStr
+    assessment_id: NonEmptyStr
     setup_candidate_id: NonEmptyStr
     action: SemanticAction
     context_score: float = Field(ge=0.0, le=1.0)

@@ -3,11 +3,15 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 
 import pytest
-from pydantic import ValidationError
 
 from ict_trading_agent.candidates import ConceptCandidate
 from ict_trading_agent.config import TradingDayPolicy, build_xauusd_intraday_v0
-from ict_trading_agent.detectors import FVGGeometryDetector, ThreeBarSwingDetector
+from ict_trading_agent.detectors import (
+    CandleFeatureConfig,
+    CandleFeatureDetector,
+    FVGGeometryDetector,
+    ThreeBarSwingDetector,
+)
 from ict_trading_agent.enums import (
     CandidateType,
     Direction,
@@ -15,7 +19,14 @@ from ict_trading_agent.enums import (
     Session,
     Timeframe,
 )
-from ict_trading_agent.market import ClosedBarFeed, OHLCBar
+from ict_trading_agent.market import (
+    ClosedBarFeed,
+    ExplicitClosureCalendar,
+    MarketClosure,
+    MarketSequenceAdjacencyPolicy,
+    OHLCBar,
+    bars_are_contiguous,
+)
 from ict_trading_agent.reducer import MarketStateReducer
 from ict_trading_agent.references import (
     CompletedSessionRange,
@@ -25,7 +36,6 @@ from ict_trading_agent.references import (
 from ict_trading_agent.sessions import SessionSchedule, SessionWindow
 from ict_trading_agent.state import TemporalContext
 from ict_trading_agent.stores import CandidateStore, DuplicateRecordError, FactStore
-
 
 UTC = timezone.utc
 T0 = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
@@ -97,6 +107,102 @@ def test_detectors_reject_missing_candle_gap() -> None:
     gapped_right = bar(15, open_=103, high=104, low=100, close=102)
     with pytest.raises(ValueError, match="contiguous"):
         detector.detect_triplet(left, middle, gapped_right)
+
+
+def test_market_calendar_distinguishes_closure_from_missing_trading_bar() -> None:
+    left = bar(0, open_=100, high=101, low=99, close=100)
+    right = bar(15, open_=100, high=102, low=99, close=101)
+    assert bars_are_contiguous(left, right) is False
+
+    calendar = ExplicitClosureCalendar(
+        calendar_id="fixture-calendar",
+        closures=[
+            MarketClosure(
+                start_at=left.close_time,
+                end_at=right.open_time,
+                reason="weekend-or-maintenance",
+            )
+        ],
+    )
+    policy = MarketSequenceAdjacencyPolicy(calendar)
+    assert bars_are_contiguous(left, right, policy) is True
+
+    incomplete_calendar = ExplicitClosureCalendar(
+        calendar_id="incomplete-calendar",
+        closures=[
+            MarketClosure(
+                start_at=left.close_time,
+                end_at=right.open_time - timedelta(minutes=5),
+                reason="partial-closure",
+            )
+        ],
+    )
+    assert (
+        bars_are_contiguous(
+            left,
+            right,
+            MarketSequenceAdjacencyPolicy(incomplete_calendar),
+        )
+        is False
+    )
+
+    middle = bar(5, open_=100, high=105, low=98, close=103)
+    triplet_calendar = ExplicitClosureCalendar(
+        calendar_id="triplet-calendar",
+        closures=[
+            MarketClosure(
+                start_at=middle.close_time,
+                end_at=right.open_time,
+                reason="scheduled-close",
+            )
+        ],
+    )
+    facts = ThreeBarSwingDetector(
+        tick_size=0.1,
+        adjacency_policy=MarketSequenceAdjacencyPolicy(triplet_calendar),
+    ).detect_triplet(left, middle, right)
+    assert facts
+    feature = CandleFeatureDetector(
+        CandleFeatureConfig(baseline_period=2),
+        adjacency_policy=MarketSequenceAdjacencyPolicy(triplet_calendar),
+    ).detect(right, [left, middle])
+    assert feature.available_at == right.close_time
+
+
+def test_daily_baseline_can_cross_an_explicit_weekend_closure() -> None:
+    thursday_open = datetime(2026, 8, 13, tzinfo=UTC)
+
+    def daily(offset_days: int, open_: float, close: float) -> OHLCBar:
+        opened = thursday_open + timedelta(days=offset_days)
+        return OHLCBar(
+            symbol="XAUUSD",
+            timeframe=Timeframe.D1,
+            open_time=opened,
+            close_time=opened + timedelta(days=1),
+            open=open_,
+            high=max(open_, close) + 5.0,
+            low=min(open_, close) - 5.0,
+            close=close,
+        )
+
+    thursday = daily(0, 3300.0, 3310.0)
+    friday = daily(1, 3310.0, 3320.0)
+    monday = daily(4, 3320.0, 3335.0)
+    calendar = ExplicitClosureCalendar(
+        calendar_id="xau-weekend-fixture",
+        closures=[
+            MarketClosure(
+                start_at=friday.close_time,
+                end_at=monday.open_time,
+                reason="weekend",
+            )
+        ],
+    )
+    feature = CandleFeatureDetector(
+        CandleFeatureConfig(baseline_period=2),
+        adjacency_policy=MarketSequenceAdjacencyPolicy(calendar),
+    ).detect(monday, [thursday, friday])
+    assert feature.metrics["baseline_period"] == 2
 
 
 def test_fvg_geometry_is_three_bar_strict_and_point_in_time_safe() -> None:
