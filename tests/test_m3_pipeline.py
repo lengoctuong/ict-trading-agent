@@ -333,11 +333,11 @@ def test_late_reclaim_is_logged_but_not_promoted_to_setup() -> None:
 
 
 def test_setup_invalidates_on_one_setup_tf_close_beyond_raid_extreme() -> None:
-    bars = ready_bars()[:4] + [bar(4, open_=101.0, high=101.2, low=98.0, close=98.5)]
+    bars = ready_bars()[:5] + [bar(5, open_=105.0, high=105.2, low=98.0, close=98.5)]
     _, _, _, setups = run_sequence(bars)
     setup = setups.visible(as_of=bars[-1].close_time)[0]
     assert setup.status is SetupStatus.INVALIDATED
-    event = setups.transitions(setup.setup_candidate_id)[0]
+    event = setups.transitions(setup.setup_candidate_id)[-1]
     assert event.reason_codes == ["SETUP_TF_CLOSE_BEYOND_RAID_EXTREME"]
     assert event.metrics["consecutive_closes"] == 1
     assert event.metrics["distance_buffer"] == 0.0
@@ -578,7 +578,11 @@ def test_m5_take_is_global_but_m15_observes_the_same_raid_episode() -> None:
         Timeframe.M15,
     }
     assert all(
-        item.hard_invalidation_price == 98.5
+        item.hard_invalidation_price is None
+        for item in setups.visible(as_of=m15.close_time)
+    )
+    assert all(
+        item.metrics["dynamic_raid_extreme"] == 98.5
         for item in setups.visible(as_of=m15.close_time)
     )
 
@@ -980,6 +984,135 @@ def test_m5_fvg_inside_m15_shift_candle_is_linked_at_shift_close() -> None:
     )
 
 
+def test_m15_same_bar_reclaim_shift_uses_m5_physical_first_take_for_fvg() -> None:
+    first_take_bar = bar(0, open_=101.0, high=101.5, low=99.0, close=99.5)
+    displacement_bar = bar(1, open_=99.5, high=104.0, low=99.4, close=103.8)
+    post_fvg_bar = bar(2, open_=103.8, high=105.0, low=103.5, close=104.5)
+    shift_bar = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0,
+        close_time=T0 + timedelta(minutes=15),
+        open=101.0,
+        high=105.0,
+        low=98.5,
+        close=104.5,
+    )
+    feed = ClosedBarFeed("XAUUSD")
+    for item in (first_take_bar, displacement_bar, post_fvg_bar, shift_bar):
+        feed.append(item, observed_at=item.close_time)
+    reference = reference_fact(
+        fact_id="pdl-100",
+        fact_type=FactType.PREVIOUS_DAY_LEVEL,
+        timeframe=Timeframe.H1,
+        side="low",
+        price=100.0,
+    )
+    breach = ObservableFact(
+        fact_id="m5-physical-first-take",
+        fact_type=FactType.LEVEL_BREACH,
+        symbol="XAUUSD",
+        timeframe=Timeframe.M5,
+        occurred_at=first_take_bar.open_time,
+        confirmed_at=first_take_bar.close_time,
+        available_at=first_take_bar.close_time,
+        geometry=PriceGeometry(price=100.0, extreme=99.0),
+        source_fact_ids=[reference.fact_id],
+        metrics={
+            "reference_fact_id": reference.fact_id,
+            "reference_fact_type": reference.fact_type.value,
+            "reference_side": "sell_side",
+            "reference_price": 100.0,
+            "reference_timeframe": Timeframe.H1.value,
+            "extreme": 99.0,
+        },
+        detector_name="fixture",
+        detector_version="0.1.0",
+    )
+    fvg = ObservableFact(
+        fact_id="pre-m15-confirmation-fvg",
+        fact_type=FactType.FVG_GEOMETRY,
+        symbol="XAUUSD",
+        timeframe=Timeframe.M5,
+        occurred_at=displacement_bar.open_time,
+        confirmed_at=displacement_bar.close_time,
+        available_at=displacement_bar.close_time,
+        direction=Direction.BULLISH,
+        geometry=PriceGeometry(low=102.0, high=103.0),
+        metrics={"ce": 102.5},
+        detector_name="fixture",
+        detector_version="0.1.0",
+    )
+    facts = FactStore()
+    facts.extend(
+        [reference, breach, candle_fact(first_take_bar), candle_fact(shift_bar), fvg]
+    )
+    candidates = CandidateStore()
+    candidates.extend(
+        [
+            ConceptCandidate(
+                candidate_id="pre-m15-confirmation-displacement",
+                candidate_type=CandidateType.DISPLACEMENT,
+                symbol="XAUUSD",
+                timeframe=Timeframe.M5,
+                direction=Direction.BULLISH,
+                occurred_at=displacement_bar.open_time,
+                available_at=displacement_bar.close_time,
+            ),
+            ConceptCandidate(
+                candidate_id="same-bar-m15-structure",
+                candidate_type=CandidateType.STRUCTURE_BREAK,
+                symbol="XAUUSD",
+                timeframe=Timeframe.M15,
+                direction=Direction.BULLISH,
+                occurred_at=shift_bar.open_time,
+                available_at=shift_bar.close_time,
+                raw_features={
+                    "reference_fact_id": "m15-high",
+                    "same_timeframe_structure_eligible": True,
+                },
+            ),
+        ]
+    )
+    setups = SetupStore()
+    m3 = M3SetupPipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        setup_store=setups,
+        tick_size=0.1,
+    )
+
+    first = m3.process_latest(timeframe=Timeframe.M5, as_of=first_take_bar.close_time)
+    assert first.setups_created == []
+    batch = m3.process_latest(timeframe=Timeframe.M15, as_of=shift_bar.close_time)
+
+    setup = next(
+        item
+        for item in setups.visible(as_of=shift_bar.close_time)
+        if item.setup_timeframe == Timeframe.M15
+    )
+    shift = next(
+        item
+        for item in candidates.visible(as_of=shift_bar.close_time)
+        if item.candidate_type == CandidateType.SHIFT
+    )
+    assert shift.raw_features["bars_after_raid"] == 0
+    assert "SAME_BAR_RAID_SHIFT" in shift.machine_labels
+    assert setup.hard_invalidation_price == 98.5
+    assert setup.metrics["invalidation_frozen"] is True
+    assert len(setup.entry_zone_candidate_ids) == 1
+    zone = candidates.as_mapping()[setup.entry_zone_candidate_ids[0]]
+    assert zone.raw_features["physical_first_take_fact_id"] == breach.fact_id
+    assert zone.raw_features["physical_first_take_available_at"] == (
+        first_take_bar.close_time.isoformat()
+    )
+    assert any(
+        event.reason_codes == ["SAME_BAR_RAID_SHIFT_CANDIDATE"]
+        for event in batch.transitions
+    )
+
+
 def test_inside_shift_fvg_consumed_before_confirmation_is_not_an_entry_zone() -> None:
     raid_bar = bar(0, open_=101.0, high=102.0, low=99.0, close=101.0)
     displacement_bar = bar(1, open_=101.0, high=104.0, low=100.8, close=103.8)
@@ -1138,13 +1271,18 @@ def test_m5_take_m15_breach_then_next_m15_bar_reclaims_without_rebreach() -> Non
     assert episode.observation_states[Timeframe.M15].value == "reclaimed"
     assert episode.extreme == 98.0
     assert all(
-        item.hard_invalidation_price == 98.0
+        item.hard_invalidation_price is None
         for item in setups.visible(as_of=m15_b.close_time)
-        if item.status is not SetupStatus.INVALIDATED
+    )
+    assert all(
+        item.metrics["dynamic_raid_extreme"] == 98.0
+        for item in setups.visible(as_of=m15_b.close_time)
     )
 
 
-def test_m15_candle_containing_raid_can_invalidate_at_its_close() -> None:
+def test_m15_candle_containing_raid_updates_dynamic_extreme_without_invalidation() -> (
+    None
+):
     m5 = bar(1, open_=101.0, high=102.0, low=99.0, close=101.0)
     m15 = OHLCBar(
         symbol="XAUUSD",
@@ -1192,10 +1330,10 @@ def test_m15_candle_containing_raid_can_invalidate_at_its_close() -> None:
     )
     assert m15.open_time < m15_setup.created_at
     assert m15.close_time > setups.get_origin(m15_setup.setup_candidate_id).available_at
-    assert m15_setup.status is SetupStatus.INVALIDATED
-    event = setups.transitions(m15_setup.setup_candidate_id)[-1]
-    assert event.metrics["invalidation_level"] == 99.0
-    assert event.metrics["invalidation_close"] == 98.8
+    assert m15_setup.status is SetupStatus.DETECTED
+    assert m15_setup.hard_invalidation_price is None
+    assert m15_setup.metrics["dynamic_raid_extreme"] == 98.5
+    assert m15_setup.metrics["invalidation_frozen"] is False
 
 
 def test_fvg_logs_multi_touch_path_aggregates_before_reaction() -> None:
@@ -1218,12 +1356,12 @@ def test_fvg_logs_multi_touch_path_aggregates_before_reaction() -> None:
     final = path[-1].metrics
     assert final["touch_count"] == 2
     assert final["first_penetration"] == pytest.approx(0.2)
-    assert final["max_penetration"] == pytest.approx(0.6)
+    assert final["max_zone_penetration_fraction"] == pytest.approx(0.6)
     assert final["ce_reached"] is True
     assert final["full_fill"] is False
     assert final["bars_since_first_touch"] == 2
     assert final["bars_inside_zone"] == 2
-    assert final["max_adverse_excursion_before_reaction"] == pytest.approx(0.6)
+    assert final["max_zone_penetration_points"] == pytest.approx(0.6)
     assert (
         setups.visible(as_of=bars[-1].close_time)[0].status is SetupStatus.READY_FOR_LLM
     )

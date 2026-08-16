@@ -1,330 +1,227 @@
-# M3.2 feedback and implementation record
+# M3.3 feedback and implementation record
 
-> **Implementation update — 2026-08-17:** Bốn mục M3.2 trong review này đã
-> được implement. `RaidEpisode` bắt đầu từ first breach và giữ state
-> `BREACHED -> RECLAIMED` riêng từng TF; inside-shift M5 FVG chỉ được promote ở
-> setup-TF close nếu chưa fully consumed/failed; containing candle dùng
-> close-time causality để invalidation; mọi touch bar cập nhật path aggregates
-> phục vụ research. Regression suite có fixture riêng cho toàn bộ case bắt buộc.
+> **Implementation update — 2026-08-17:** Bốn mục trong review này đã được
+> implement. Shift chấp nhận khoảng cách `0..window` và gắn label
+> `SAME_BAR_RAID_SHIFT`; inside-shift FVG neo vào physical
+> `first_take_fact_id`; raid extreme dynamic trước SHIFT rồi freeze thành hard
+> invalidation tại SHIFT; hai path feature đã đổi thành
+> `max_zone_penetration_points` và `max_zone_penetration_fraction`. Regression
+> suite có fixture M5 first take/FVG trước M15 same-bar reclaim+shift. M3 được
+> freeze để chuyển sang M4.
 
-Review ban đầu: **M3.1 sửa đúng phần lớn các issue lần trước**: global `RaidEpisode`, tách H1/M15 setup với M5 entry, effective swing rank, FVG touch→reaction nhiều bar, FVG failure và post-terminal research logging đều đã được implement/test. Docs hiện cũng đánh M3.1 là implemented.
+Check lại bản **M3.2 mới nhất** rồi. Lần này 4 lỗi tôi bắt trước đó đều đã được Codex sửa đúng hướng và có test. `implementation_plan.md` cũng đã chuyển M3 sang trạng thái **M3.2 implemented**.
 
-Nhưng tôi phát hiện **2 vấn đề ICT critical mới + 2 improvement quan trọng**. Tôi chưa cho sang M4 trước khi patch chúng.
+## Status M3.2
 
-## M3.1 review
-
-| Status              | Vấn đề / task                                | Hiểu đơn giản                                                                         | Cách dev đề xuất                                                                                                                                                | Confidence | Need review          |
-| ------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------: | -------------------- |
-| **DONE**            | Global liquidity take                        | M5 lấy H1 liquidity thì level đã TAKEN toàn cục                                       | Giữ hiện tại: 1 global `RaidEpisode`, nhiều TF observation                                                                                                      |        98% | Không                |
-| **DONE**            | Setup TF ≠ Entry TF                          | M15/H1 là setup, M5 là entry                                                          | Hiện tạo H1 + M15 setup path riêng, `entry_timeframe=M5`                                                                                                        |        98% | Không                |
-| **DONE**            | Structure cross-TF                           | M5 close H1 swing không phải H1 BOS                                                   | Same-TF mới eligible shift; cross-TF giữ raw evidence                                                                                                           |        98% | Không                |
-| **DONE**            | Swing hierarchy                              | LLM biết break đó là STH hay ITH/LTH                                                  | Effective rank hiện được resolve tại thời điểm break và đưa vào SHIFT evidence                                                                                  |        95% | Không                |
-| **DONE**            | FVG multi-bar reaction                       | Touch bar A, reaction bar B vẫn được                                                  | Có `TOUCHED -> REACTED/FAILED/EXPIRED`, reaction window=3                                                                                                       |        93% | Review `3 bars` ở M4 |
-| **DONE**            | Post-expiry logging                          | Setup hết hạn vẫn quan sát xem event đến muộn không                                   | Có `LATE_SHIFT`, `LATE_FVG`, `LATE_RETRACE` và research horizon                                                                                                 |        97% | Không                |
-| **CRITICAL NEW**    | **M5 FVG nằm bên trong M15/H1 shift candle** | FVG tạo ra chính cú MSS có thể xuất hiện **trước lúc candle M15 đóng**                | Cho phép entry-TF displacement/FVG nằm trong setup-TF shift candle, không chỉ sau `shift.available_at`; chỉ dùng nếu FVG vẫn valid/fresh khi shift được confirm |    **98%** | **Có**               |
-| **CRITICAL NEW**    | **Cross-TF multi-bar raid/reclaim**          | M5 take trước, M15 close dưới level rồi candle M15 sau reclaim lên — hiện có thể miss | `RaidEpisode` phải track breach/extreme/reclaim theo từng TF qua nhiều bars, độc lập với global `TAKEN`                                                         |    **98%** | **Có**               |
-| **HIGH**            | Invalidation candle chứa raid                | M15 candle đang mở lúc M5 raid có thể đóng phá setup, nhưng code có thể skip nó       | Dùng availability/close-time causality thay vì loại toàn bộ candle có `open_time <= raid.created_at`                                                            |        94% | Có                   |
-| **HIGH / research** | FVG touch path logging                       | FVG bị touch 3 lần trước khi reaction nhưng hiện raw path chưa đủ chi tiết            | Log mỗi zone observation hoặc aggregate `touch_count`, max penetration, CE reached, time in zone, etc.                                                          |        97% | Không                |
-
----
-
-# Critical #1 — tôi nghĩ rất quan trọng
-
-Code hiện yêu cầu:
-
-```text
-M5 displacement.occurred_at >= M15 shift.available_at
-```
-
-Nếu displacement xảy ra trước lúc M15 candle đóng thì `_repricing_lag()` trả `None`.
-
-Nhưng market có thể rất tự nhiên như:
-
-```text
-10:00 ───────────── 10:15
-       M15 shift candle
-
-10:05 liquidity raid
-10:08 M5 displacement
-10:10 M5 FVG confirmed
-10:15 M15 closes → structural shift confirmed
-```
-
-Cú:
-
-```text
-10:08 displacement
-→ 10:10 FVG
-```
-
-có thể chính là repricing **tạo nên M15 shift**.
-
-Current M3 lại chỉ bắt kiểu:
-
-```text
-10:15 M15 shift confirmed
-↓
-10:20+ M5 displacement/FVG
-```
-
-=> có nguy cơ bỏ rất nhiều ICT sequence tốt.
-
-### Tôi đề xuất
-
-Định nghĩa relation:
-
-```text
-M5 FVG relation to M15 shift:
-
-1. INSIDE_SHIFT_BAR
-2. AFTER_SHIFT_CONFIRMATION
-```
-
-Cả hai đều được candidate.
-
-Nhưng nếu là `INSIDE_SHIFT_BAR`, tại thời điểm M15 shift được confirmed phải kiểm tra:
-
-```text
-FVG đã available
-AND
-FVG chưa failed/fully consumed
-```
-
-Ví dụ:
-
-```text
-10:10 FVG xuất hiện
-10:12 FVG bị fill hoàn toàn
-10:15 M15 shift confirm
-
-→ giữ làm historical evidence
-→ KHÔNG coi là current entry zone
-```
-
-Đây vẫn point-in-time safe: **10:15 mới đưa setup đi tiếp**, ta chỉ nhìn lại những facts đã xảy ra trước 10:15 chứ không giả vờ biết M15 shift từ 10:05.
+| Status         | Task                                   | Hiểu đơn giản                                                                    | Review                                                                                              | Confidence | Need review          |
+| -------------- | -------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ---------: | -------------------- |
+| ✅ **DONE**     | Global RaidEpisode                     | Liquidity bị lấy một lần globally, nhiều TF cùng quan sát                        | Đúng                                                                                                |        98% | Không                |
+| ✅ **DONE**     | Cross-TF multi-bar reclaim             | M15 breach bar A, bar B reclaim mà không cần breach lại                          | Đã có state `NOT_SEEN → BREACHED → RECLAIMED`, test đúng case này.                                  |        98% | Không                |
+| ✅ **DONE**     | Global extreme                         | Giá raid sâu thêm thì extreme được update                                        | Test `99 → 98` và invalidation level update theo episode.                                           |        97% | Không                |
+| ✅ **DONE**     | M5 FVG trong M15 shift candle          | Không bỏ cú displacement tạo chính M15 MSS                                       | Đã link `inside_shift_bar`; FVG bị consume trước M15 close thì chỉ research-log, không dùng entry.  |        98% | Không                |
+| ✅ **DONE**     | FVG reaction nhiều bar                 | Touch → touch → reaction vẫn được                                                | Test track 2 touches rồi reaction.                                                                  |        96% | Window `3` review M4 |
+| ✅ **DONE**     | FVG path logging                       | Giữ penetration, CE, fill, time-in-zone                                          | Đã có touch count, first/max penetration, CE, full fill...                                          |        96% | Không                |
+| ✅ **DONE**     | Containing-candle invalidation         | M15 candle mở trước raid nhưng đóng sau raid vẫn được xét                        | Đã sửa causality theo close/availability và có test.                                                |        92% | Xem lưu ý dưới       |
+| ✅ **DONE**     | Research after terminal                | Parameter quá strict vẫn có dữ liệu late setup                                   | Giữ nguyên tốt                                                                                      |        98% | Không                |
+| 🟠 **NEW**     | **Raid + shift cùng một setup candle** | Một candle có thể vừa sweep liquidity vừa break structure                        | Hiện code bắt `bars_after_raid >= 1`, nên case `0 bar` bị mất.                                      |    **95%** | **Có**               |
+| 🟡 **IMPROVE** | Tên ML feature MAE                     | Feature đang gọi `max_adverse_excursion` nhưng thực chất gần với depth xuyên FVG | Rename/define chính xác trước dataset M4                                                            |        95% | Không                |
 
 ---
 
-# Critical #2 — multi-TF reclaim vẫn chưa hoàn chỉnh
+# Vấn đề mới đáng sửa: sweep + shift cùng candle
 
-Test hiện tại cover:
-
-```text
-M5 sweep H1 level
-+
-M15 candle cũng breach + reclaim cùng candle
-→ M15 observes same RaidEpisode
-```
-
-và test này pass theo code fixture.
-
-Nhưng case quan trọng khác:
+Code hiện:
 
 ```text
-H1 SSL = 3300
-
-M5:
-3298 → first take
-
-M15 candle A:
-low = 3295
-close = 3298
-→ chưa reclaim
-
-M15 candle B:
-low = 3297
-close = 3304
-→ reclaim
+if 1 <= bars_after_raid <= window:
+    accept shift
 ```
 
-hoặc thậm chí:
+nên bắt buộc:
 
 ```text
-M15 B:
-low = 3301
-close = 3304
+raid candle
+→ ít nhất 1 candle sau
+→ shift
 ```
 
-Tức B **không re-breach**, nó chỉ reclaim level mà candle trước đã breach.
 
-Current `_observe_existing_episodes()` yêu cầu mỗi observation bar:
+
+Nhưng market hoàn toàn có thể:
 
 ```text
-breached == True
-AND
-reclaimed == True
+M15 candle
+↓ wick lấy SSL
+↓ displacement mạnh
+↓ close xuyên relevant swing high
+
+= liquidity raid + structural shift
+  trên cùng một candle
 ```
 
-trên **cùng bar**.
+Với triết lý **recall-first**, tôi không muốn loại case này.
 
-=> case multi-bar M15 phía trên có thể mất.
+### Đề xuất
 
-Nghiêm trọng hơn: trong lúc chờ reclaim:
+Cho:
 
 ```text
-M5 first extreme = 3298
-sau đó market xuống 3293
-sau đó mới reclaim 3300
+0 <= bars_after_raid <= window
 ```
 
-`RaidEpisode.extreme` phải trở thành:
+và label riêng:
 
 ```text
-3293
+SAME_BAR_RAID_SHIFT
 ```
 
-chứ không giữ `3298`.
+Không khẳng định đây chắc chắn là CHoCH/MSS tốt.
 
-### Model nên là
+LLM sau này quyết:
 
 ```text
-Global RaidEpisode
-reference = 3300
-first_take = 3298
-extreme = continuously updated
-
-M15 observation state:
-NOT_SEEN
-→ BREACHED
-→ RECLAIMED
-
-M5 observation state:
-BREACHED
-→ RECLAIMED
-
-H1 observation state:
-...
+meaningful MSS?
+hay oversized/noisy candle?
 ```
 
-Quan trọng:
+### Còn MTF case quan trọng hơn
 
-> **Global TAKEN chỉ ngăn tạo một liquidity event mới. Nó không được ngăn việc tiếp tục quan sát episode đang diễn ra.**
+Ví dụ chính candle M15 đó:
 
-Đây đúng triết lý mình đã chốt trước đó.
+```text
+10:00 ───────────── 10:15 M15
+
+10:03 sweep SSL
+10:05 M5 displacement
+10:10 M5 FVG
+10:15 M15 close xuyên swing
+```
+
+Nếu M15 raid chỉ được confirm lúc `10:15`, ta **vẫn phải cho phép M5 FVG 10:10 thuộc cùng raid/shift episode**, vì physical first-take đã xảy ra trước đó.
+
+M3.2 đã có `first_take_fact_id` và episode bắt đầu từ breach, nên data để làm đúng việc này đã tồn tại.
+
+**Tôi đề xuất patch nhỏ M3.3 cho case này trước M4. Confidence 95%.**
 
 ---
 
-# #3 Invalidation có một edge case
+## Một điểm tôi muốn bạn review: invalidation của candle chứa raid
 
-Hiện code không invalidate nếu:
-
-```python
-bar.open_time <= setup.created_at
-```
-
-
-
-Ví dụ:
+Current test nói:
 
 ```text
-10:00 M15 candle opens
+M5 raid low = 99.0
 
-10:05 M5 raid
-10:10 raid confirmed
+cùng M15 candle:
+low   = 98.5
+close = 98.8
 
-10:15 M15 closes mạnh dưới raid extreme
+→ INVALIDATED vì close < 99.0
 ```
 
-M15 candle mở trước raid:
+
+
+Có một ambiguity:
+
+### Cách A — current code
+
+Dùng **extreme đã biết trước khi M15 candle đóng**:
 
 ```text
-10:00 < 10:05
+old extreme = 99
+M15 close 98.8 < 99
+→ invalidate
 ```
 
-nên hiện có khả năng bị skip.
+### Cách B — dynamic raid extreme
 
-Nhưng tại **10:15**, setup đã tồn tại và M15 close là thông tin mới hợp lệ.
-
-Tôi muốn condition dựa vào:
+Khi M15 đóng ta biết:
 
 ```text
-bar.close_time > setup.available_at
+raid episode extreme = 98.5
+close = 98.8 > 98.5
 ```
 
-chứ không dựa vào lúc bar mở.
+→ đây có thể được hiểu là raid **đã extend xuống 98.5 rồi reclaim khỏi extreme**, chưa nhất thiết invalidate.
+
+Tôi hơi nghiêng **B cho detector/research**, vì phù hợp với global RaidEpisode đang continuously update extreme hơn và giảm nguy cơ kill setup quá sớm.
+
+Nhưng đây chính xác là loại **ICT semantic cần bạn review**, không nên để software tự quyết.
+
+Proposal recall-first:
+
+```text
+trước SHIFT confirmation:
+    raid extreme có thể tiếp tục deepen
+    → update dynamic extreme
+    → không hard invalidate bởi containing candle
+
+sau SHIFT confirmed:
+    freeze hard_invalidation_price
+    → setup-TF close beyond frozen extreme kills thesis
+```
+
+**Confidence: 82%, cần review.**
+
+Cách này khá tự nhiên:
+
+```text
+RAID đang hình thành
+→ extreme dynamic
+
+SHIFT xác nhận
+→ raid hoàn tất
+→ freeze extreme
+→ từ đây dùng làm invalidation
+```
 
 ---
 
-# #4 Logging FVG cần thêm cho ML/research
+# Logging feature: một chỉnh sửa nhỏ
 
-M3.1 đã tiến bộ nhiều:
-
-```text
-TOUCHED
-→ REACTED
-/ FAILED
-/ EXPIRED
-```
-
-
-
-Nhưng nếu:
+Code đang lưu:
 
 ```text
-touch #1 = 20%
-touch #2 = 60%
-touch #3 = CE
-touch #4 = 85%
-→ reaction
-```
-
-ta rất muốn giữ path đó.
-
-Tôi muốn cuối M3 có features:
-
-```text
-touch_count
-first_touch_at
-last_touch_at
-
-first_penetration
-max_penetration
-
-ce_reached
-full_fill
-
-bars_since_first_touch
-bars_inside_zone
-
 max_adverse_excursion_before_reaction
 ```
 
-Không cần dùng chúng để filter.
-
-**Chỉ log.**
-
-Sau M4/M5 chúng cực kỳ hữu ích để tìm xem:
+nhưng calculation thực tế hiện gần với:
 
 ```text
-20% penetration tốt hơn 80%?
-CE touch có edge?
-multiple-touch FVG yếu đi?
-reaction sau 1 bar vs 3 bars?
+distance từ near edge của FVG đến deepest penetration
 ```
 
-và sau này đưa trực tiếp thành ML features.
+chứ chưa phải MAE của một trade thực sự.
+
+Nên trước M4 tôi đổi tên:
+
+```text
+max_zone_penetration_points
+max_zone_penetration_fraction
+```
+
+Sau này khi có hypothetical entry price mới tính:
+
+```text
+MAE
+MFE
+```
+
+Để dataset ML sau này không bị feature mang tên sai nghĩa.
 
 ---
 
-# M3.2 tôi đề xuất Codex làm
-
-| Priority | Task                                      | Answer đơn giản                                                          | Dev                                                                                       | Confidence | Need review |
-| -------- | ----------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | ---------: | ----------- |
-| **P0**   | Cross-TF repricing/FVG                    | Cho phép M5 FVG nằm **trong M15/H1 shift candle**                        | Link bằng temporal containment + future FVG; tại shift confirmation check zone vẫn usable |        98% | **Có**      |
-| **P0**   | Raid observation state                    | Multi-bar reclaim phải hoạt động cả cross-TF                             | Track per-TF `BREACHED → RECLAIMED`, update global extreme mọi bar trong episode          |        98% | **Có**      |
-| **P1**   | Setup invalidation timing                 | Candle chứa raid được phép invalidate khi nó đóng sau setup availability | sửa causality check                                                                       |        94% | Có          |
-| **P1**   | FVG observation logging                   | Không mất penetration/touch path                                         | append raw observation per touch/bar + derived aggregates                                 |        97% | Không       |
-| **Test** | M5 FVG inside M15 shift candle            | Bắt bug #1                                                               | fixture M5 displacement/FVG trước M15 close                                               |        99% | Không       |
-| **Test** | M5 take → M15 breach → next M15 reclaim   | Bắt bug #2                                                               | không yêu cầu candle reclaim re-breach                                                    |        99% | Không       |
-| **Test** | Raid extreme deepens before reclaim       | Invalidation level phải update                                           | 3298→3293→reclaim                                                                         |        99% | Không       |
-| **Test** | M15 containing raid closes beyond extreme | Bắt invalidation edge                                                    | ensure setup INVALIDATED                                                                  |        98% | Không       |
-
 ## Kết luận
 
-M3 trước: **~75%**
+M3.1 tôi chấm ~90%.
 
-M3.1 hiện tại: **~90%**
+**M3.2 hiện ~96%.**
 
-Tôi **chưa sang M4** vì hai P0 phía trên liên quan trực tiếp đến *“có detect đủ đúng ICT sequence hay không”*. Nếu replay trước khi sửa, M4 có thể báo thống kê rất đẹp nhưng dataset setup đã bị missing một nhóm MTF setup ngay từ detector.
+Tôi chỉ muốn **M3.3 rất nhỏ**:
 
-Sau **M3.2 này**, tôi nghĩ đủ để freeze detection semantics và chuyển sang **M4 real XAU replay + parameter/recall analysis**.
+1. hỗ trợ `same-bar raid + shift`;
+2. link entry-TF repricing dựa trên physical first-take trong same setup candle;
+3. chốt **dynamic vs frozen raid extreme**;
+4. rename penetration feature cho đúng nghĩa.
+
+Sau đó tôi **đồng ý freeze M3 và chuyển M4**. M4 lúc đó tập trung vào real Exness XAUUSD replay, detection recall và calibration `3 / 12-8-4 / 24-16-6` thay vì tiếp tục sửa architecture.

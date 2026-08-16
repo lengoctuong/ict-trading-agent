@@ -185,7 +185,7 @@ Frozen M3 research windows use tradable-bar counts:
 
 ```text
 multi-bar reclaim: <= 3 bars
-raid -> shift:     M5=12, M15=8, H1=4
+raid -> shift:     0..M5=12, 0..M15=8, 0..H1=4
 FVG expiry:        M5=24, M15=16, H1=6 from FVG availability
 repricing candle:  shift bar or its next bar
 ```
@@ -203,22 +203,30 @@ extreme; the reclaim bar need not breach the reference again.
 A shift is eligible only when its setup-timeframe candle closes through a
 confirmed swing on that same timeframe in the raid direction. The break and
 SHIFT evidence record the effective append-only STH/ITH/LTH rank visible at
-break time. The shift remains
+break time. A raid/reclaim and close-through in the same setup-TF candle is
+eligible at distance zero and labelled `SAME_BAR_RAID_SHIFT`. The shift remains
 `UNCLASSIFIED`; the semantic evaluator decides whether it is noise, internal
 CHoCH, or a meaningful reversal. The linked FVG must be formed by the selected
 repricing candle. An M5 displacement/FVG may occur inside the M15/H1 shift
 candle before that setup candle closes. Such evidence is not promoted until
 the shift close, and is excluded from the active entry zones if fully filled or
-failed before confirmation. The candidate records `inside_shift_bar` versus
-`after_shift_confirmation` explicitly.
+failed before confirmation. Its causal lower bound is the episode's physical
+`first_take_fact_id`, not the later setup-TF reclaim confirmation. The candidate
+records `inside_shift_bar` versus `after_shift_confirmation` explicitly.
+
+Before SHIFT, the global raid extreme remains dynamic and cannot hard-invalidate
+the still-forming raid thesis. SHIFT freezes the current episode extreme as
+`hard_invalidation_price`; after that point, one setup-timeframe close beyond
+the frozen level invalidates the setup with zero buffer.
 
 Touch records `touched`, `penetration_fraction`, and
 `favorable_close_outside`. A favorable close may confirm on the touch bar or
 within the following three entry bars. A close through the far edge records an
 explicit `FAILED` zone; expiry is recorded separately. Every touch bar updates
-research-only path aggregates: touch count/times, first and maximum
-penetration, CE/full-fill flags, bars since first touch, closes inside the zone,
-and maximum adverse excursion before reaction.
+research-only path aggregates: touch count/times, first penetration,
+`max_zone_penetration_fraction`, `max_zone_penetration_points`, CE/full-fill
+flags, bars since first touch, and closes inside the zone. These are zone-depth
+features, not trade MAE/MFE.
 
 Every raid/setup origin and transition is append-only. The trading path stays
 terminal after invalidation or expiry, while a separate research observer logs

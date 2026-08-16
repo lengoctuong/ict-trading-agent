@@ -39,8 +39,8 @@ means that design is enforced by code and tests.
 
 7. **Close-acceptance calibration — OPEN, non-blocking research.** The v0
    default is implemented as one setup-timeframe close beyond the invalidation
-   level with zero distance buffer. Alternatives such as two closes or an ATR
-   buffer remain replay experiments, not runtime ambiguity.
+   level frozen at SHIFT, with zero distance buffer. Alternatives such as two
+   closes or an ATR buffer remain replay experiments, not runtime ambiguity.
 
 ## Resolved and implemented
 
@@ -49,12 +49,14 @@ means that design is enforced by code and tests.
   UTC-midnight day. New York remains the
   independent clock for sessions, killzones, and the 00:00 NY True Day Open.
   `build_exness_xauusd_intraday_v0()` records UTC raw time plus feed-defined D1.
-- **M3.2 lifecycle — IMPLEMENTED.** One global RaidEpisode starts at first
+- **M3.3 lifecycle — IMPLEMENTED AND FROZEN.** One global RaidEpisode starts at first
   breach, tracks per-TF `BREACHED -> RECLAIMED` observations and continuously
   updates its extreme. Independent H1/M15 setup paths accept usable M5 FVGs
-  formed inside the shift candle or after its confirmation. Stateful FVG zones
-  and favorable reaction closes lead to `READY_FOR_LLM`; trading terminals
-  remain terminal while research observation continues for calibration.
+  formed after the physical first take, including inside the shift candle.
+  Same-bar raid + shift is retained with a dedicated label. The raid extreme is
+  dynamic before SHIFT and frozen as hard invalidation at SHIFT. Stateful FVG
+  zones and favorable reaction closes lead to `READY_FOR_LLM`; trading
+  terminals remain terminal while research observation continues.
 - **Multi-bar reclaim and timing — IMPLEMENTED as versioned research policy.**
   Same-bar reclaim is canonical; reclaim within three bars is permissive; late
   reclaim remains raw evidence. Shift and FVG clocks use tradable bar counts.
@@ -75,7 +77,8 @@ means that design is enforced by code and tests.
   confirmed swing-break candidates and keeps them `UNCLASSIFIED`; the semantic
   evaluator decides which reference is contextually significant.
 - **Close acceptance v0 — IMPLEMENTED and enforced.** One setup-timeframe close
-  beyond the raid extreme with zero buffer invalidates the setup.
+  beyond the raid extreme frozen at SHIFT, with zero buffer, invalidates the
+  setup. A containing candle before SHIFT only deepens the dynamic extreme.
 - **Semantic decision identity — IMPLEMENTED.** `SetupSemanticDecision` has
   `decision_id` and `assessment_id`; `TradeDecision` references
   `semantic_decision_id`.

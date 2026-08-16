@@ -151,7 +151,7 @@ def _event_id(prefix: str, *parts: object) -> str:
 class M3SetupPipeline:
     """Append-only RAID -> SHIFT -> ENTRY_ZONE -> READY setup lifecycle."""
 
-    version = "0.1.2"
+    version = "0.1.3"
 
     def __init__(
         self,
@@ -312,6 +312,40 @@ class M3SetupPipeline:
             setups_created.extend(created)
             transitions.extend(merged)
 
+        observed_facts, observed_updates, merged = self._observe_existing_episodes(bar)
+        self._append_facts(observed_facts)
+        facts.extend(observed_facts)
+        raid_updates.extend(observed_updates)
+        transitions.extend(merged)
+
+        for observation in observed_facts:
+            if (
+                observation.metrics.get("observation_state")
+                != RaidObservationState.RECLAIMED.value
+                or int(observation.metrics.get("reclaim_span_bars", 0))
+                > self.policy.reclaim_window_bars
+            ):
+                continue
+            reference_id = str(observation.metrics["reference_fact_id"])
+            episode = self.raid_store.by_reference(
+                reference_id, as_of=observation.available_at
+            )
+            if episode is None or episode.raid_candidate_ids:
+                continue
+            promoted = self._raid_candidate_from_observation(episode, observation)
+            self._append_candidates([promoted])
+            candidates.append(promoted)
+            raid_observation, _, update, created, promoted_transitions = (
+                self._record_raid(promoted)
+            )
+            if raid_observation.fact_id not in self.fact_store.as_mapping():
+                self._append_facts([raid_observation])
+                facts.append(raid_observation)
+            if update is not None:
+                raid_updates.append(update)
+            setups_created.extend(created)
+            transitions.extend(promoted_transitions)
+
         invalidation_snapshot = {
             setup.setup_candidate_id: (
                 setup.hard_invalidation_price,
@@ -322,12 +356,6 @@ class M3SetupPipeline:
                 symbol=bar.symbol,
             )
         }
-
-        observed_facts, observed_updates, merged = self._observe_existing_episodes(bar)
-        self._append_facts(observed_facts)
-        facts.extend(observed_facts)
-        raid_updates.extend(observed_updates)
-        transitions.extend(merged)
 
         for setup in list(
             self.setup_store.visible(
@@ -615,13 +643,14 @@ class M3SetupPipeline:
         cross_timeframe: bool,
         raid_candidate_id: str | None = None,
     ) -> ObservableFact:
+        fact_id = stable_fact_id(
+            FactType.RAID_OBSERVATION.value,
+            reference_id,
+            timeframe.value,
+            occurred_at.isoformat(),
+        )
         return ObservableFact(
-            fact_id=stable_fact_id(
-                FactType.RAID_OBSERVATION.value,
-                reference_id,
-                timeframe.value,
-                occurred_at.isoformat(),
-            ),
+            fact_id=fact_id,
             fact_type=FactType.RAID_OBSERVATION,
             symbol=symbol,
             timeframe=timeframe,
@@ -630,7 +659,7 @@ class M3SetupPipeline:
             available_at=available_at,
             direction=direction,
             geometry=PriceGeometry(price=reference_price, extreme=extreme),
-            source_fact_ids=list(source_fact_ids),
+            source_fact_ids=[item for item in source_fact_ids if item != fact_id],
             metrics={
                 "reference_fact_id": reference_id,
                 "raid_candidate_id": raid_candidate_id,
@@ -677,6 +706,77 @@ class M3SetupPipeline:
                 }
             },
             deep=True,
+        )
+
+    def _raid_candidate_from_observation(
+        self,
+        episode: RaidEpisode,
+        observation: ObservableFact,
+    ) -> ConceptCandidate:
+        """Promote an eligible cross-TF reclaim into the episode's first raid."""
+        if observation.timeframe is None or observation.geometry is None:
+            raise ValueError("raid observation requires timeframe and geometry")
+        if observation.geometry.extreme is None:
+            raise ValueError("raid observation requires an extreme")
+        reference = self.fact_store.as_mapping()[episode.reference_fact_id]
+        reference_level = ReferenceLevel.from_fact(reference)
+        side = reference_level.side
+        reclaim_span = int(observation.metrics.get("reclaim_span_bars", 0))
+        breached_at = datetime.fromisoformat(str(observation.metrics["breached_at"]))
+        current_episode = self.raid_store.current(
+            episode.raid_episode_id, as_of=observation.available_at
+        )
+        return ConceptCandidate(
+            candidate_id=stable_candidate_id(
+                CandidateType.LIQUIDITY_EVENT.value,
+                episode.raid_episode_id,
+                observation.timeframe.value,
+                breached_at.isoformat(),
+                observation.available_at.isoformat(),
+            ),
+            candidate_type=CandidateType.LIQUIDITY_EVENT,
+            symbol=observation.symbol,
+            timeframe=observation.timeframe,
+            direction=episode.direction,
+            occurred_at=breached_at,
+            available_at=observation.available_at,
+            evidence_fact_ids=list(
+                dict.fromkeys(
+                    [
+                        episode.reference_fact_id,
+                        episode.first_take_fact_id,
+                        *observation.source_fact_ids,
+                        observation.fact_id,
+                    ]
+                )
+            ),
+            raw_features={
+                "reference_fact_id": episode.reference_fact_id,
+                "reference_timeframe": (
+                    reference.timeframe.value
+                    if reference.timeframe is not None
+                    else None
+                ),
+                "reference_price": reference_level.price,
+                "reference_side": side.value,
+                "extreme": current_episode.extreme,
+                "same_bar_reclaim": reclaim_span == 0,
+                "reclaim_span_bars": reclaim_span,
+                "breach_available_at": self.fact_store.as_mapping()[
+                    episode.first_take_fact_id
+                ].available_at.isoformat(),
+                "reclaim_available_at": observation.available_at.isoformat(),
+                "promoted_from_raid_observation": True,
+            },
+            machine_labels=[
+                (
+                    "canonical_same_bar_sweep_candidate"
+                    if reclaim_span == 0
+                    else "permissive_multi_bar_sweep_candidate"
+                ),
+                "reclaimed_reference_level",
+                "cross_timeframe_episode_activation",
+            ],
         )
 
     def _record_raid(
@@ -764,7 +864,7 @@ class M3SetupPipeline:
                 evidence_fact_ids=list(
                     dict.fromkeys([*raid.evidence_fact_ids, observation.fact_id])
                 ),
-                hard_invalidation_price=episode.extreme,
+                hard_invalidation_price=None,
                 target_candidate_ids=[
                     target.candidate_id
                     for target in self.target_candidates
@@ -782,6 +882,8 @@ class M3SetupPipeline:
                     "raid_bar_open_at": raid.occurred_at.isoformat(),
                     "raid_available_at": raid.available_at.isoformat(),
                     "raid_extreme": episode.extreme,
+                    "dynamic_raid_extreme": episode.extreme,
+                    "invalidation_frozen": False,
                     "same_bar_reclaim": raid.raw_features.get("same_bar_reclaim"),
                     "reclaim_span_bars": raid.raw_features.get("reclaim_span_bars", 0),
                 },
@@ -850,13 +952,13 @@ class M3SetupPipeline:
                     ),
                     evidence_fact_ids=[observation.fact_id],
                     reason_codes=["RAID_EPISODE_EVIDENCE_MERGED"],
-                    hard_invalidation_price=current_episode.extreme,
                     metrics={
                         "raid_episode_merged": True,
                         "raid_observation_timeframes": [
                             item.value for item in current_episode.observed_timeframes
                         ],
                         "raid_extreme": current_episode.extreme,
+                        "dynamic_raid_extreme": current_episode.extreme,
                     },
                 )
             )
@@ -976,7 +1078,11 @@ class M3SetupPipeline:
         level_override: float | None = None,
         setup_available_at: AwareDatetime | None = None,
     ) -> SetupTransition | None:
-        level = level_override or setup.hard_invalidation_price
+        level = (
+            level_override
+            if level_override is not None
+            else setup.hard_invalidation_price
+        )
         effective_available_at = setup_available_at or setup.available_at
         if level is None or bar.close_time <= effective_available_at:
             return None
@@ -1025,7 +1131,8 @@ class M3SetupPipeline:
             and candidate.direction == setup.direction
             and candidate.raw_features.get("same_timeframe_structure_eligible") is True
         ]
-        if 1 <= distance <= window and structure_candidates:
+        if 0 <= distance <= window and structure_candidates:
+            same_bar_raid_shift = distance == 0
             fact_ids = list(
                 dict.fromkeys(
                     fact_id
@@ -1076,12 +1183,17 @@ class M3SetupPipeline:
                     ),
                     "structure_break_type": "unclassified",
                     "same_timeframe_structure_eligible": True,
+                    "same_bar_raid_shift": same_bar_raid_shift,
                 },
                 machine_labels=[
                     "shift_candidate",
                     "unclassified_bos_choch",
                     "same_timeframe_close_through",
+                    *(["SAME_BAR_RAID_SHIFT"] if same_bar_raid_shift else []),
                 ],
+            )
+            episode = self.raid_store.current(
+                str(setup.metrics["raid_episode_id"]), as_of=bar.close_time
             )
             transition = self._append_transition(
                 setup,
@@ -1093,11 +1205,22 @@ class M3SetupPipeline:
                     *(candidate.candidate_id for candidate in structure_candidates),
                 ],
                 evidence_fact_ids=[*fact_ids, *self._bar_fact_ids(bar)],
-                reason_codes=["DIRECTIONAL_SHIFT_WITHIN_WINDOW"],
+                reason_codes=[
+                    (
+                        "SAME_BAR_RAID_SHIFT_CANDIDATE"
+                        if same_bar_raid_shift
+                        else "DIRECTIONAL_SHIFT_WITHIN_WINDOW"
+                    )
+                ],
+                hard_invalidation_price=episode.extreme,
                 metrics={
                     "shift_candidate_id": shift.candidate_id,
                     "shift_bar_open_at": bar.open_time.isoformat(),
                     "bars_after_raid": distance,
+                    "same_bar_raid_shift": same_bar_raid_shift,
+                    "frozen_raid_extreme": episode.extreme,
+                    "invalidation_frozen": True,
+                    "invalidation_frozen_at": bar.close_time.isoformat(),
                 },
             )
             return [shift], transition, []
@@ -1284,6 +1407,20 @@ class M3SetupPipeline:
             return [], None, []
         candidate_map = self.candidate_store.as_mapping()
         raid_candidate = candidate_map[str(setup.metrics["raid_candidate_id"])]
+        episode = self.raid_store.current(
+            str(setup.metrics["raid_episode_id"]), as_of=shift_bar.close_time
+        )
+        first_take = self.fact_store.as_mapping().get(episode.first_take_fact_id)
+        physical_start_occurred = (
+            first_take.occurred_at
+            if first_take is not None
+            else raid_candidate.occurred_at
+        )
+        physical_start_available = (
+            first_take.available_at
+            if first_take is not None
+            else raid_candidate.available_at
+        )
         displacements = self.candidate_store.visible(
             as_of=shift_bar.close_time,
             symbol=shift_bar.symbol,
@@ -1305,8 +1442,8 @@ class M3SetupPipeline:
                 if not (
                     shift.occurred_at <= displacement.occurred_at
                     and displacement.available_at <= shift.available_at
-                    and displacement.occurred_at >= raid_candidate.occurred_at
-                    and displacement.available_at >= raid_candidate.available_at
+                    and displacement.occurred_at >= physical_start_occurred
+                    and displacement.available_at >= physical_start_available
                 ):
                     continue
                 for fvg in fvg_facts:
@@ -1376,6 +1513,14 @@ class M3SetupPipeline:
                                 "temporal_relation": "inside_shift_bar",
                                 "fvg_available_at": fvg.available_at.isoformat(),
                                 "shift_confirmed_at": shift.available_at.isoformat(),
+                                "physical_first_take_fact_id": (
+                                    first_take.fact_id
+                                    if first_take is not None
+                                    else None
+                                ),
+                                "physical_first_take_available_at": (
+                                    physical_start_available.isoformat()
+                                ),
                                 "low": fvg.geometry.low,
                                 "high": fvg.geometry.high,
                                 "ce": fvg.metrics["ce"],
@@ -1441,12 +1586,12 @@ class M3SetupPipeline:
         first_touch_at: str | None = None
         last_touch_at: str | None = None
         first_penetration: float | None = None
-        max_penetration = 0.0
+        max_zone_penetration_fraction = 0.0
         ce_reached = False
         full_fill = False
         failed_close = False
         bars_inside_zone = 0
-        max_adverse = 0.0
+        max_zone_penetration_points = 0.0
         size = high - low
         for item in self.bar_feed.bars(timeframe, as_of=as_of):
             if item.open_time < available_at:
@@ -1470,23 +1615,25 @@ class M3SetupPipeline:
             last_touch_at = item.open_time.isoformat()
             if first_penetration is None:
                 first_penetration = penetration
-            max_penetration = max(max_penetration, penetration)
+            max_zone_penetration_fraction = max(
+                max_zone_penetration_fraction, penetration
+            )
             ce_reached = ce_reached or penetration >= 0.5
             full_fill = full_fill or filled
             failed_close = failed_close or failed
             bars_inside_zone += int(low <= item.close <= high)
-            max_adverse = max(max_adverse, adverse)
+            max_zone_penetration_points = max(max_zone_penetration_points, adverse)
         return {
             "touch_count": touch_count,
             "first_touch_at": first_touch_at,
             "last_touch_at": last_touch_at,
             "first_penetration": first_penetration,
-            "max_penetration": max_penetration,
+            "max_zone_penetration_fraction": max_zone_penetration_fraction,
             "ce_reached": ce_reached,
             "full_fill": full_fill,
             "failed_close": failed_close,
             "bars_inside_zone": bars_inside_zone,
-            "max_adverse_excursion_before_reaction": max_adverse,
+            "max_zone_penetration_points": max_zone_penetration_points,
         }
 
     def _maybe_react_or_expire(
@@ -1563,8 +1710,8 @@ class M3SetupPipeline:
             first_penetration = latest.get("first_penetration")
             if first_penetration is None and touched:
                 first_penetration = penetration
-            max_penetration = max(
-                float(latest.get("max_penetration", 0.0)),
+            max_zone_penetration_fraction = max(
+                float(latest.get("max_zone_penetration_fraction", 0.0)),
                 penetration if touched else 0.0,
             )
             ce_reached = bool(latest.get("ce_reached", False)) or (
@@ -1576,8 +1723,8 @@ class M3SetupPipeline:
             bars_inside_zone = int(latest.get("bars_inside_zone", 0)) + int(
                 touched and low <= bar.close <= high
             )
-            max_adverse = max(
-                float(latest.get("max_adverse_excursion_before_reaction", 0.0)),
+            max_zone_penetration_points = max(
+                float(latest.get("max_zone_penetration_points", 0.0)),
                 adverse_now if touched else 0.0,
             )
             reaction_lag = (
@@ -1660,14 +1807,14 @@ class M3SetupPipeline:
                     "first_touch_at": first_touch_at,
                     "last_touch_at": last_touch_at,
                     "first_penetration": first_penetration,
-                    "max_penetration": max_penetration,
+                    "max_zone_penetration_fraction": max_zone_penetration_fraction,
                     "ce_reached": ce_reached,
                     "full_fill": full_fill,
                     "bars_since_first_touch": (
                         reaction_lag if first_touch_at is not None else None
                     ),
                     "bars_inside_zone": bars_inside_zone,
-                    "max_adverse_excursion_before_reaction": max_adverse,
+                    "max_zone_penetration_points": max_zone_penetration_points,
                     "close_price": bar.close,
                     "lifecycle": lifecycle.value,
                     "reason_code": reason_code,
