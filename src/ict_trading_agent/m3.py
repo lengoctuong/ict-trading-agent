@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from hashlib import sha256
 from typing import Any
 
@@ -23,6 +24,7 @@ from .enums import (
     FactType,
     FvgLifecycle,
     LiquiditySide,
+    RaidObservationState,
     SetupStatus,
     Timeframe,
 )
@@ -149,7 +151,7 @@ def _event_id(prefix: str, *parts: object) -> str:
 class M3SetupPipeline:
     """Append-only RAID -> SHIFT -> ENTRY_ZONE -> READY setup lifecycle."""
 
-    version = "0.1.1"
+    version = "0.1.2"
 
     def __init__(
         self,
@@ -280,6 +282,14 @@ class M3SetupPipeline:
         facts.extend(reclaim_facts)
         candidates.extend(raid_candidates)
 
+        breach_facts, breach_episodes, breach_updates = self._record_current_breaches(
+            bar
+        )
+        self._append_facts(breach_facts)
+        facts.extend(breach_facts)
+        episodes_created.extend(breach_episodes)
+        raid_updates.extend(breach_updates)
+
         current_raids = [
             candidate
             for candidate in self.candidate_store.visible(
@@ -302,6 +312,17 @@ class M3SetupPipeline:
             setups_created.extend(created)
             transitions.extend(merged)
 
+        invalidation_snapshot = {
+            setup.setup_candidate_id: (
+                setup.hard_invalidation_price,
+                setup.available_at,
+            )
+            for setup in self.setup_store.visible(
+                as_of=bar.close_time,
+                symbol=bar.symbol,
+            )
+        }
+
         observed_facts, observed_updates, merged = self._observe_existing_episodes(bar)
         self._append_facts(observed_facts)
         facts.extend(observed_facts)
@@ -321,7 +342,16 @@ class M3SetupPipeline:
                 continue
 
             if bar.timeframe == setup.setup_timeframe:
-                transition = self._maybe_invalidate(setup, bar)
+                transition = self._maybe_invalidate(
+                    setup,
+                    bar,
+                    level_override=invalidation_snapshot.get(
+                        setup.setup_candidate_id, (None, setup.available_at)
+                    )[0],
+                    setup_available_at=invalidation_snapshot.get(
+                        setup.setup_candidate_id, (None, setup.available_at)
+                    )[1],
+                )
                 if transition is not None:
                     transitions.append(transition)
                     continue
@@ -338,6 +368,21 @@ class M3SetupPipeline:
                 facts.extend(research)
                 if transition is not None:
                     transitions.append(transition)
+                    if transition.to_status == SetupStatus.FORMING:
+                        setup = self.setup_store.current(setup.setup_candidate_id)
+                        inside_zones, zone_transition, inside_research = (
+                            self._maybe_link_inside_shift_fvg(
+                                setup,
+                                new_candidates,
+                                bar,
+                            )
+                        )
+                        self._append_candidates(inside_zones)
+                        self._append_facts(inside_research)
+                        candidates.extend(inside_zones)
+                        facts.extend(inside_research)
+                        if zone_transition is not None:
+                            transitions.append(zone_transition)
 
             setup = self.setup_store.current(setup.setup_candidate_id)
             if (
@@ -477,6 +522,128 @@ class M3SetupPipeline:
                 raids.append(self.liquidity_raids.detect(breach, reclaim))
         return facts, raids
 
+    def _record_current_breaches(
+        self,
+        bar: OHLCBar,
+    ) -> tuple[list[ObservableFact], list[RaidEpisode], list[RaidEpisodeUpdate]]:
+        visible = self.fact_store.visible(
+            as_of=bar.close_time,
+            symbol=bar.symbol,
+            timeframe=bar.timeframe,
+        )
+        current_breaches = [
+            fact
+            for fact in visible
+            if fact.fact_type == FactType.LEVEL_BREACH
+            and fact.available_at == bar.close_time
+        ]
+        reclaims = [
+            fact for fact in visible if fact.fact_type == FactType.LEVEL_RECLAIM
+        ]
+        observations: list[ObservableFact] = []
+        episodes: list[RaidEpisode] = []
+        updates: list[RaidEpisodeUpdate] = []
+        for breach in current_breaches:
+            reference_id = str(breach.metrics["reference_fact_id"])
+            side = LiquiditySide(str(breach.metrics["reference_side"]))
+            direction = (
+                Direction.BEARISH
+                if side == LiquiditySide.BUY_SIDE
+                else Direction.BULLISH
+            )
+            reclaimed = any(breach.fact_id in item.source_fact_ids for item in reclaims)
+            state = (
+                RaidObservationState.RECLAIMED
+                if reclaimed
+                else RaidObservationState.BREACHED
+            )
+            observation = self._raid_observation(
+                reference_id=reference_id,
+                symbol=bar.symbol,
+                timeframe=bar.timeframe,
+                direction=direction,
+                occurred_at=bar.open_time,
+                available_at=bar.close_time,
+                reference_price=float(breach.metrics["reference_price"]),
+                extreme=float(breach.metrics["extreme"]),
+                state=state,
+                breached_at=breach.occurred_at,
+                source_fact_ids=[breach.fact_id],
+                cross_timeframe=False,
+            )
+            existing = self.raid_store.by_reference(reference_id, as_of=bar.close_time)
+            if existing is None:
+                episode = RaidEpisode(
+                    raid_episode_id=_event_id("raid-episode", reference_id),
+                    reference_fact_id=reference_id,
+                    symbol=bar.symbol,
+                    direction=direction,
+                    created_at=breach.occurred_at,
+                    available_at=breach.available_at,
+                    first_take_fact_id=breach.fact_id,
+                    observation_fact_ids=[observation.fact_id],
+                    observed_timeframes=[bar.timeframe],
+                    observation_states={bar.timeframe: state},
+                    breached_at={bar.timeframe: breach.occurred_at},
+                    extreme=float(breach.metrics["extreme"]),
+                )
+                self.raid_store.append_episode(episode)
+                episodes.append(episode)
+                observations.append(observation)
+                continue
+            if observation.fact_id in existing.observation_fact_ids:
+                continue
+            update = self._append_raid_update(existing, observation)
+            observations.append(observation)
+            updates.append(update)
+        return observations, episodes, updates
+
+    def _raid_observation(
+        self,
+        *,
+        reference_id: str,
+        symbol: str,
+        timeframe: Timeframe,
+        direction: Direction,
+        occurred_at: AwareDatetime,
+        available_at: AwareDatetime,
+        reference_price: float,
+        extreme: float,
+        state: RaidObservationState,
+        breached_at: AwareDatetime,
+        source_fact_ids: Sequence[str],
+        cross_timeframe: bool,
+        raid_candidate_id: str | None = None,
+    ) -> ObservableFact:
+        return ObservableFact(
+            fact_id=stable_fact_id(
+                FactType.RAID_OBSERVATION.value,
+                reference_id,
+                timeframe.value,
+                occurred_at.isoformat(),
+            ),
+            fact_type=FactType.RAID_OBSERVATION,
+            symbol=symbol,
+            timeframe=timeframe,
+            occurred_at=occurred_at,
+            confirmed_at=available_at,
+            available_at=available_at,
+            direction=direction,
+            geometry=PriceGeometry(price=reference_price, extreme=extreme),
+            source_fact_ids=list(source_fact_ids),
+            metrics={
+                "reference_fact_id": reference_id,
+                "raid_candidate_id": raid_candidate_id,
+                "raid_detection_timeframe": timeframe.value,
+                "observation_state": state.value,
+                "breached_at": breached_at.isoformat(),
+                "cross_timeframe_observation": cross_timeframe,
+                "extreme": extreme,
+            },
+            detector_name="RaidEpisodeObserver",
+            detector_version=self.version,
+        )
+
     def _raid_observation_from_candidate(
         self,
         raid: ConceptCandidate,
@@ -486,35 +653,30 @@ class M3SetupPipeline:
         if raid.direction not in {Direction.BULLISH, Direction.BEARISH}:
             raise ValueError("raid candidate requires a directional outcome")
         reference_id = str(raid.raw_features["reference_fact_id"])
-        return ObservableFact(
-            fact_id=stable_fact_id(
-                FactType.RAID_OBSERVATION.value,
-                reference_id,
-                raid.timeframe.value,
-                raid.occurred_at.isoformat(),
-            ),
-            fact_type=FactType.RAID_OBSERVATION,
+        observation = self._raid_observation(
+            reference_id=reference_id,
             symbol=raid.symbol,
             timeframe=raid.timeframe,
-            occurred_at=raid.occurred_at,
-            confirmed_at=raid.available_at,
-            available_at=raid.available_at,
             direction=raid.direction,
-            geometry=PriceGeometry(
-                price=float(raid.raw_features["reference_price"]),
-                extreme=float(raid.raw_features["extreme"]),
-            ),
-            source_fact_ids=list(raid.evidence_fact_ids),
-            metrics={
-                "reference_fact_id": reference_id,
-                "raid_candidate_id": raid.candidate_id,
-                "raid_detection_timeframe": raid.timeframe.value,
-                "same_bar_reclaim": raid.raw_features.get("same_bar_reclaim"),
-                "reclaim_span_bars": raid.raw_features.get("reclaim_span_bars", 0),
-                "extreme": float(raid.raw_features["extreme"]),
+            occurred_at=raid.occurred_at,
+            available_at=raid.available_at,
+            reference_price=float(raid.raw_features["reference_price"]),
+            extreme=float(raid.raw_features["extreme"]),
+            state=RaidObservationState.RECLAIMED,
+            breached_at=raid.occurred_at,
+            source_fact_ids=raid.evidence_fact_ids,
+            cross_timeframe=False,
+            raid_candidate_id=raid.candidate_id,
+        )
+        return observation.model_copy(
+            update={
+                "metrics": observation.metrics
+                | {
+                    "same_bar_reclaim": raid.raw_features.get("same_bar_reclaim"),
+                    "reclaim_span_bars": raid.raw_features.get("reclaim_span_bars", 0),
+                }
             },
-            detector_name="RaidEpisodeObserver",
-            detector_version=self.version,
+            deep=True,
         )
 
     def _record_raid(
@@ -538,22 +700,38 @@ class M3SetupPipeline:
                 direction=raid.direction,
                 created_at=raid.occurred_at,
                 available_at=raid.available_at,
+                first_take_fact_id=(
+                    raid.evidence_fact_ids[1]
+                    if len(raid.evidence_fact_ids) > 1
+                    else raid.candidate_id
+                ),
                 first_raid_candidate_id=raid.candidate_id,
                 raid_candidate_ids=[raid.candidate_id],
                 observation_fact_ids=[observation.fact_id],
                 observed_timeframes=[raid.timeframe],
+                observation_states={raid.timeframe: RaidObservationState.RECLAIMED},
+                breached_at={raid.timeframe: raid.occurred_at},
                 extreme=float(raid.raw_features["extreme"]),
             )
             self.raid_store.append_episode(episode)
             setups = self._create_setups(episode, raid, observation)
             return observation, episode, None, setups, []
-        if observation.fact_id in existing.observation_fact_ids:
+        if raid.candidate_id in existing.raid_candidate_ids:
             return observation, None, None, [], []
         update = self._append_raid_update(
-            existing,
-            observation,
-            raid_candidate_id=raid.candidate_id,
+            existing, observation, raid_candidate_id=raid.candidate_id
         )
+        current_episode = self.raid_store.current(existing.raid_episode_id)
+        episode_setups = [
+            setup
+            for setup in self.setup_store.visible(
+                as_of=raid.available_at, symbol=raid.symbol
+            )
+            if setup.metrics.get("raid_episode_id") == existing.raid_episode_id
+        ]
+        if not episode_setups:
+            setups = self._create_setups(current_episode, raid, observation)
+            return observation, None, update, setups, []
         transitions = self._merge_episode_evidence(
             existing.raid_episode_id,
             observation,
@@ -624,7 +802,10 @@ class M3SetupPipeline:
         assert observation.geometry.extreme is not None
         update = RaidEpisodeUpdate(
             update_id=_event_id(
-                "raid-update", episode.raid_episode_id, observation.fact_id
+                "raid-update",
+                episode.raid_episode_id,
+                observation.fact_id,
+                raid_candidate_id or "observation-only",
             ),
             raid_episode_id=episode.raid_episode_id,
             occurred_at=observation.occurred_at,
@@ -632,6 +813,10 @@ class M3SetupPipeline:
             observation_fact_id=observation.fact_id,
             observation_timeframe=observation.timeframe,
             raid_candidate_id=raid_candidate_id,
+            observation_state=RaidObservationState(
+                str(observation.metrics["observation_state"])
+            ),
+            breached_at=observation.metrics["breached_at"],
             extreme=observation.geometry.extreme,
         )
         self.raid_store.append_update(update)
@@ -701,6 +886,11 @@ class M3SetupPipeline:
                 continue
             reference = ReferenceLevel.from_fact(reference_fact)
             level = reference.price
+            previous_state = episode.observation_states.get(
+                bar.timeframe, RaidObservationState.NOT_SEEN
+            )
+            if previous_state == RaidObservationState.RECLAIMED:
+                continue
             if reference.side == LiquiditySide.BUY_SIDE:
                 breached = bar.high > level
                 reclaimed = bar.close < level
@@ -711,33 +901,60 @@ class M3SetupPipeline:
                 reclaimed = bar.close > level
                 extreme = bar.low
                 direction = Direction.BULLISH
-            if not (breached and reclaimed and direction == episode.direction):
+            if direction != episode.direction:
                 continue
-            overlaps_first_take = bar.open_time <= episode.created_at < bar.close_time
-            elapsed = self._bars_since(episode.available_at, bar)
-            if not overlaps_first_take and elapsed > self.policy.reclaim_window_bars:
+            if previous_state == RaidObservationState.NOT_SEEN and not breached:
                 continue
-            observation = ObservableFact(
-                fact_id=observation_id,
-                fact_type=FactType.RAID_OBSERVATION,
+            breached_at = episode.breached_at.get(bar.timeframe, bar.open_time)
+            state = (
+                RaidObservationState.RECLAIMED
+                if reclaimed
+                else RaidObservationState.BREACHED
+            )
+            source_ids = [episode.reference_fact_id]
+            previous_observations = [
+                fact
+                for fact in fact_map.values()
+                if fact.fact_type == FactType.RAID_OBSERVATION
+                and fact.timeframe == bar.timeframe
+                and fact.metrics.get("reference_fact_id") == episode.reference_fact_id
+            ]
+            if previous_observations:
+                source_ids.append(
+                    max(
+                        previous_observations,
+                        key=lambda item: (item.available_at, item.fact_id),
+                    ).fact_id
+                )
+            observation = self._raid_observation(
+                reference_id=episode.reference_fact_id,
                 symbol=bar.symbol,
                 timeframe=bar.timeframe,
-                occurred_at=bar.open_time,
-                confirmed_at=bar.close_time,
-                available_at=bar.close_time,
                 direction=episode.direction,
-                geometry=PriceGeometry(price=level, extreme=extreme),
-                source_fact_ids=[episode.reference_fact_id],
-                metrics={
-                    "raid_episode_id": episode.raid_episode_id,
-                    "reference_fact_id": episode.reference_fact_id,
-                    "raid_detection_timeframe": bar.timeframe.value,
-                    "cross_timeframe_observation": True,
-                    "same_bar_reclaim": True,
-                    "extreme": extreme,
+                occurred_at=bar.open_time,
+                available_at=bar.close_time,
+                reference_price=level,
+                extreme=extreme,
+                state=state,
+                breached_at=breached_at,
+                source_fact_ids=source_ids,
+                cross_timeframe=True,
+            )
+            reclaim_span = self._bar_distance(bar.timeframe, breached_at, bar.open_time)
+            observation = observation.model_copy(
+                update={
+                    "metrics": observation.metrics
+                    | {
+                        "raid_episode_id": episode.raid_episode_id,
+                        "same_bar_reclaim": (
+                            state == RaidObservationState.RECLAIMED
+                            and previous_state == RaidObservationState.NOT_SEEN
+                        ),
+                        "reclaim_span_bars": reclaim_span,
+                        "breached_this_bar": breached,
+                    }
                 },
-                detector_name="RaidEpisodeObserver",
-                detector_version=self.version,
+                deep=True,
             )
             update = self._append_raid_update(episode, observation)
             facts.append(observation)
@@ -755,9 +972,13 @@ class M3SetupPipeline:
         self,
         setup: SetupCandidate,
         bar: OHLCBar,
+        *,
+        level_override: float | None = None,
+        setup_available_at: AwareDatetime | None = None,
     ) -> SetupTransition | None:
-        level = setup.hard_invalidation_price
-        if level is None or bar.open_time <= setup.created_at:
+        level = level_override or setup.hard_invalidation_price
+        effective_available_at = setup_available_at or setup.available_at
+        if level is None or bar.close_time <= effective_available_at:
             return None
         invalid = (
             bar.close < level
@@ -790,10 +1011,7 @@ class M3SetupPipeline:
         raid_candidate = self.candidate_store.as_mapping()[
             str(setup.metrics["raid_candidate_id"])
         ]
-        episode = self.raid_store.current(
-            str(setup.metrics["raid_episode_id"]), as_of=bar.close_time
-        )
-        distance = self._bars_since(episode.available_at, bar)
+        distance = self._bars_since(raid_candidate.available_at, bar)
         window = self.policy.shift_window_bars[bar.timeframe]
         structure_candidates = [
             candidate
@@ -975,6 +1193,9 @@ class M3SetupPipeline:
                                 "shift_candidate_id": shift.candidate_id,
                                 "displacement_candidate_id": displacement.candidate_id,
                                 "repricing_lag_bars": lag,
+                                "temporal_relation": "after_shift_confirmation",
+                                "fvg_available_at": fvg.available_at.isoformat(),
+                                "shift_confirmed_at": shift.available_at.isoformat(),
                                 "low": fvg.geometry.low,
                                 "high": fvg.geometry.high,
                                 "ce": fvg.metrics["ce"],
@@ -1048,6 +1269,226 @@ class M3SetupPipeline:
             return [], transition, research
         return [], None, []
 
+    def _maybe_link_inside_shift_fvg(
+        self,
+        setup: SetupCandidate,
+        shift_candidates: Sequence[ConceptCandidate],
+        shift_bar: OHLCBar,
+    ) -> tuple[list[ConceptCandidate], SetupTransition | None, list[ObservableFact]]:
+        shifts = [
+            item
+            for item in shift_candidates
+            if item.candidate_type == CandidateType.SHIFT
+        ]
+        if not shifts:
+            return [], None, []
+        candidate_map = self.candidate_store.as_mapping()
+        raid_candidate = candidate_map[str(setup.metrics["raid_candidate_id"])]
+        displacements = self.candidate_store.visible(
+            as_of=shift_bar.close_time,
+            symbol=shift_bar.symbol,
+            timeframe=setup.entry_timeframe,
+            candidate_type=CandidateType.DISPLACEMENT,
+        )
+        fvg_facts = self.fact_store.visible(
+            as_of=shift_bar.close_time,
+            symbol=shift_bar.symbol,
+            timeframe=setup.entry_timeframe,
+            fact_type=FactType.FVG_GEOMETRY,
+        )
+        zones: list[ConceptCandidate] = []
+        research: list[ObservableFact] = []
+        for shift in shifts:
+            for displacement in displacements:
+                if displacement.direction != setup.direction:
+                    continue
+                if not (
+                    shift.occurred_at <= displacement.occurred_at
+                    and displacement.available_at <= shift.available_at
+                    and displacement.occurred_at >= raid_candidate.occurred_at
+                    and displacement.available_at >= raid_candidate.available_at
+                ):
+                    continue
+                for fvg in fvg_facts:
+                    if fvg.direction != setup.direction:
+                        continue
+                    if fvg.occurred_at != displacement.occurred_at:
+                        continue
+                    if fvg.available_at > shift.available_at:
+                        continue
+                    assert fvg.geometry is not None
+                    assert fvg.geometry.low is not None
+                    assert fvg.geometry.high is not None
+                    path = self._fvg_path_until(
+                        low=fvg.geometry.low,
+                        high=fvg.geometry.high,
+                        direction=setup.direction,
+                        available_at=fvg.available_at,
+                        as_of=shift.available_at,
+                        timeframe=setup.entry_timeframe,
+                    )
+                    if path["full_fill"] or path["failed_close"]:
+                        research.append(
+                            self._research_observation(
+                                setup,
+                                shift_bar,
+                                "INSIDE_SHIFT_FVG_CONSUMED_BEFORE_CONFIRMATION",
+                                candidate_ids=[displacement.candidate_id],
+                                metrics={
+                                    "fvg_fact_id": fvg.fact_id,
+                                    "temporal_relation": "inside_shift_bar",
+                                    **path,
+                                },
+                            )
+                        )
+                        continue
+                    candidate_id = stable_candidate_id(
+                        CandidateType.FVG.value,
+                        setup.setup_candidate_id,
+                        fvg.fact_id,
+                        displacement.candidate_id,
+                    )
+                    if candidate_id in candidate_map or any(
+                        item.candidate_id == candidate_id for item in zones
+                    ):
+                        continue
+                    zones.append(
+                        ConceptCandidate(
+                            candidate_id=candidate_id,
+                            candidate_type=CandidateType.FVG,
+                            symbol=setup.symbol,
+                            timeframe=setup.entry_timeframe,
+                            direction=setup.direction,
+                            occurred_at=fvg.occurred_at,
+                            # The linked interpretation only becomes available
+                            # when the setup-TF shift candle has closed.
+                            available_at=shift.available_at,
+                            evidence_fact_ids=[fvg.fact_id],
+                            related_candidate_ids=[
+                                shift.candidate_id,
+                                displacement.candidate_id,
+                            ],
+                            raw_features={
+                                "setup_candidate_id": setup.setup_candidate_id,
+                                "shift_candidate_id": shift.candidate_id,
+                                "displacement_candidate_id": displacement.candidate_id,
+                                "repricing_lag_bars": None,
+                                "temporal_relation": "inside_shift_bar",
+                                "fvg_available_at": fvg.available_at.isoformat(),
+                                "shift_confirmed_at": shift.available_at.isoformat(),
+                                "low": fvg.geometry.low,
+                                "high": fvg.geometry.high,
+                                "ce": fvg.metrics["ce"],
+                                "expiry_window_bars": self.policy.fvg_expiry_bars[
+                                    setup.entry_timeframe
+                                ],
+                                "preconfirmation_path": path,
+                                "initial_lifecycle": (
+                                    FvgLifecycle.TOUCHED.value
+                                    if path["touch_count"]
+                                    else FvgLifecycle.FRESH.value
+                                ),
+                            },
+                            machine_labels=[
+                                "linked_repricing_fvg",
+                                "inside_shift_bar",
+                                "usable_at_shift_confirmation",
+                                (
+                                    FvgLifecycle.TOUCHED.value
+                                    if path["touch_count"]
+                                    else FvgLifecycle.FRESH.value
+                                ),
+                            ],
+                        )
+                    )
+        if not zones:
+            return [], None, research
+        transition = self._append_transition(
+            setup,
+            SetupStatus.FORMING,
+            shift_bar.open_time,
+            shift_bar.close_time,
+            evidence_candidate_ids=list(
+                dict.fromkeys(
+                    candidate_id
+                    for zone in zones
+                    for candidate_id in [zone.candidate_id, *zone.related_candidate_ids]
+                )
+            ),
+            evidence_fact_ids=[
+                fact_id for zone in zones for fact_id in zone.evidence_fact_ids
+            ],
+            entry_zone_candidate_ids=[zone.candidate_id for zone in zones],
+            reason_codes=["INSIDE_SHIFT_REPRICING_FVG_AVAILABLE"],
+            metrics={
+                "entry_zone_available_at": shift_bar.close_time.isoformat(),
+                "fvg_temporal_relation": "inside_shift_bar",
+            },
+        )
+        return zones, transition, research
+
+    def _fvg_path_until(
+        self,
+        *,
+        low: float,
+        high: float,
+        direction: Direction,
+        available_at: AwareDatetime,
+        as_of: AwareDatetime,
+        timeframe: Timeframe,
+    ) -> dict[str, Any]:
+        touch_count = 0
+        first_touch_at: str | None = None
+        last_touch_at: str | None = None
+        first_penetration: float | None = None
+        max_penetration = 0.0
+        ce_reached = False
+        full_fill = False
+        failed_close = False
+        bars_inside_zone = 0
+        max_adverse = 0.0
+        size = high - low
+        for item in self.bar_feed.bars(timeframe, as_of=as_of):
+            if item.open_time < available_at:
+                continue
+            touched = item.low <= high and item.high >= low
+            if not touched:
+                continue
+            if direction == Direction.BULLISH:
+                penetration = (high - item.low) / size
+                filled = item.low <= low
+                failed = item.close < low
+                adverse = max(0.0, high - item.low)
+            else:
+                penetration = (item.high - low) / size
+                filled = item.high >= high
+                failed = item.close > high
+                adverse = max(0.0, item.high - low)
+            penetration = min(1.0, max(0.0, penetration))
+            touch_count += 1
+            first_touch_at = first_touch_at or item.open_time.isoformat()
+            last_touch_at = item.open_time.isoformat()
+            if first_penetration is None:
+                first_penetration = penetration
+            max_penetration = max(max_penetration, penetration)
+            ce_reached = ce_reached or penetration >= 0.5
+            full_fill = full_fill or filled
+            failed_close = failed_close or failed
+            bars_inside_zone += int(low <= item.close <= high)
+            max_adverse = max(max_adverse, adverse)
+        return {
+            "touch_count": touch_count,
+            "first_touch_at": first_touch_at,
+            "last_touch_at": last_touch_at,
+            "first_penetration": first_penetration,
+            "max_penetration": max_penetration,
+            "ce_reached": ce_reached,
+            "full_fill": full_fill,
+            "failed_close": failed_close,
+            "bars_inside_zone": bars_inside_zone,
+            "max_adverse_excursion_before_reaction": max_adverse,
+        }
+
     def _maybe_react_or_expire(
         self,
         setup: SetupCandidate,
@@ -1097,25 +1538,55 @@ class M3SetupPipeline:
             touched = bar.low <= high and bar.high >= low
             size = high - low
             if setup.direction == Direction.BULLISH:
-                penetration = (high - max(bar.low, low)) / size
+                penetration = (high - bar.low) / size
                 favorable_close = bar.close > high
                 failed = bar.close < low
+                full_fill_now = bar.low <= low
+                adverse_now = max(0.0, high - bar.low)
             else:
-                penetration = (min(bar.high, high) - low) / size
+                penetration = (bar.high - low) / size
                 favorable_close = bar.close < low
                 failed = bar.close > high
+                full_fill_now = bar.high >= high
+                adverse_now = max(0.0, bar.high - low)
             penetration = min(1.0, max(0.0, penetration))
-            touch_fact = next(
-                (
-                    fact
-                    for fact in history
-                    if fact.metrics.get("lifecycle") == FvgLifecycle.TOUCHED.value
-                ),
-                None,
+            seed = dict(zone.raw_features.get("preconfirmation_path", {}))
+            latest = history[-1].metrics if history else seed
+            prior_touch_count = int(latest.get("touch_count", 0))
+            touch_count = prior_touch_count + int(touched)
+            first_touch_at = latest.get("first_touch_at")
+            if first_touch_at is None and touched:
+                first_touch_at = bar.open_time.isoformat()
+            last_touch_at = (
+                bar.open_time.isoformat() if touched else latest.get("last_touch_at")
+            )
+            first_penetration = latest.get("first_penetration")
+            if first_penetration is None and touched:
+                first_penetration = penetration
+            max_penetration = max(
+                float(latest.get("max_penetration", 0.0)),
+                penetration if touched else 0.0,
+            )
+            ce_reached = bool(latest.get("ce_reached", False)) or (
+                touched and penetration >= 0.5
+            )
+            full_fill = bool(latest.get("full_fill", False)) or (
+                touched and full_fill_now
+            )
+            bars_inside_zone = int(latest.get("bars_inside_zone", 0)) + int(
+                touched and low <= bar.close <= high
+            )
+            max_adverse = max(
+                float(latest.get("max_adverse_excursion_before_reaction", 0.0)),
+                adverse_now if touched else 0.0,
             )
             reaction_lag = (
-                self._bar_distance(bar.timeframe, touch_fact.occurred_at, bar.open_time)
-                if touch_fact is not None
+                self._bar_distance(
+                    bar.timeframe,
+                    datetime.fromisoformat(str(first_touch_at)),
+                    bar.open_time,
+                )
+                if first_touch_at is not None
                 else 0
             )
             lifecycle: FvgLifecycle | None = None
@@ -1123,7 +1594,7 @@ class M3SetupPipeline:
             if failed:
                 lifecycle = FvgLifecycle.FAILED
                 reason_code = "FVG_CLOSE_THROUGH_FAR_EDGE"
-            elif favorable_close and (touched or touch_fact is not None):
+            elif favorable_close and touch_count > 0:
                 if reaction_lag <= self.policy.reaction_confirmation_bars:
                     lifecycle = FvgLifecycle.REACTED
                     reason_code = "FVG_FAVORABLE_REACTION_CLOSE"
@@ -1140,13 +1611,20 @@ class M3SetupPipeline:
                             },
                         )
                     )
-            elif touched and touch_fact is None:
+            elif touched:
                 lifecycle = FvgLifecycle.TOUCHED
-                reason_code = "FVG_TOUCHED"
+                reason_code = "FVG_TOUCH_OBSERVATION"
 
-            elapsed = self._bars_after_available(zone.available_at, bar)
+            fvg_available_at = datetime.fromisoformat(
+                str(
+                    zone.raw_features.get(
+                        "fvg_available_at", zone.available_at.isoformat()
+                    )
+                )
+            )
+            elapsed = self._bars_after_available(fvg_available_at, bar)
             if (
-                lifecycle is None
+                lifecycle in {None, FvgLifecycle.TOUCHED}
                 and elapsed >= self.policy.fvg_expiry_bars[bar.timeframe]
             ):
                 lifecycle = FvgLifecycle.EXPIRED
@@ -1178,6 +1656,18 @@ class M3SetupPipeline:
                     "penetration_fraction": penetration,
                     "favorable_close_outside": favorable_close,
                     "fully_failed": failed,
+                    "touch_count": touch_count,
+                    "first_touch_at": first_touch_at,
+                    "last_touch_at": last_touch_at,
+                    "first_penetration": first_penetration,
+                    "max_penetration": max_penetration,
+                    "ce_reached": ce_reached,
+                    "full_fill": full_fill,
+                    "bars_since_first_touch": (
+                        reaction_lag if first_touch_at is not None else None
+                    ),
+                    "bars_inside_zone": bars_inside_zone,
+                    "max_adverse_excursion_before_reaction": max_adverse,
                     "close_price": bar.close,
                     "lifecycle": lifecycle.value,
                     "reason_code": reason_code,

@@ -39,6 +39,10 @@ facts, timestamps, geometry, position sizing, or risk checks.
   entry evidence, and setup-timeframe invalidation.
 - Stateful FVG entry zones (`FRESH -> TOUCHED -> REACTED/FAILED/EXPIRED`) and
   post-terminal near-miss observation for replay calibration.
+- Per-timeframe raid observation state (`BREACHED -> RECLAIMED`) with continuous
+  global-extreme updates, including reclaim bars that do not re-breach.
+- M5 displacement/FVG evidence contained inside a later-confirmed M15/H1 shift
+  candle, promoted only if the zone is still usable at shift confirmation.
 - Independent liquidity/structure lifecycle, cross-timeframe provenance, and
   append-only swing hierarchy promotions.
 - Traceable `ReadyForLLMPayload` snapshots containing raw evidence, targets,

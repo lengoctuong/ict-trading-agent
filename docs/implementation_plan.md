@@ -41,7 +41,7 @@ Status: implemented; concrete broker closure calendar remains open.
 
 ## M3 — Setup state machine
 
-Status: M3.1 implemented with causal single- and multi-timeframe fixtures;
+Status: M3.2 implemented with causal single- and multi-timeframe fixtures;
 research windows remain versioned calibration parameters for M4.
 
 ```text
@@ -49,8 +49,13 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 ```
 
 - Global first-take liquidity lifecycle and append-only cross-TF RaidEpisode.
+- Per-TF raid `BREACHED -> RECLAIMED` state from first breach, with continuous
+  global-extreme updates and no same-bar re-breach requirement.
 - Independent H1/M15 setup paths, M5 entry evidence, and setup-TF invalidation.
+- Inside-shift M5 repricing/FVG linkage with usability checked at shift close.
 - Stateful FVG touch/reaction/failure/expiry facts with multi-bar confirmation.
+- Research-only multi-touch penetration, CE, full-fill, time-in-zone, and MAE
+  path aggregates.
 - Deterministic invalidation/expiry policies.
 - Structured READY_FOR_LLM JSON output.
 - Independent liquidity and structural-reference lifecycle.

@@ -49,11 +49,12 @@ means that design is enforced by code and tests.
   UTC-midnight day. New York remains the
   independent clock for sessions, killzones, and the 00:00 NY True Day Open.
   `build_exness_xauusd_intraday_v0()` records UTC raw time plus feed-defined D1.
-- **M3.1 lifecycle — IMPLEMENTED.** One global RaidEpisode collects M1/M5/M15/H1
-  observations and creates independent H1/M15 setup paths with M5 entry
-  evidence. Stateful FVG zones and favorable reaction closes lead to
-  `READY_FOR_LLM`; trading terminals remain terminal while research observation
-  continues for the configured calibration horizon.
+- **M3.2 lifecycle — IMPLEMENTED.** One global RaidEpisode starts at first
+  breach, tracks per-TF `BREACHED -> RECLAIMED` observations and continuously
+  updates its extreme. Independent H1/M15 setup paths accept usable M5 FVGs
+  formed inside the shift candle or after its confirmation. Stateful FVG zones
+  and favorable reaction closes lead to `READY_FOR_LLM`; trading terminals
+  remain terminal while research observation continues for calibration.
 - **Multi-bar reclaim and timing — IMPLEMENTED as versioned research policy.**
   Same-bar reclaim is canonical; reclaim within three bars is permissive; late
   reclaim remains raw evidence. Shift and FVG clocks use tradable bar counts.

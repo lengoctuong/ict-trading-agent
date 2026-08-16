@@ -143,6 +143,9 @@ class RaidEpisodeStore:
         raid_ids = list(episode.raid_candidate_ids)
         observation_ids = list(episode.observation_fact_ids)
         timeframes = list(episode.observed_timeframes)
+        states = dict(episode.observation_states)
+        breached_at = dict(episode.breached_at)
+        first_raid_candidate_id = episode.first_raid_candidate_id
         available_at = episode.available_at
         extreme = episode.extreme
         updates = sorted(
@@ -160,6 +163,11 @@ class RaidEpisodeStore:
             timeframes.append(update.observation_timeframe)
             if update.raid_candidate_id is not None:
                 raid_ids.append(update.raid_candidate_id)
+                if first_raid_candidate_id is None:
+                    first_raid_candidate_id = update.raid_candidate_id
+            states[update.observation_timeframe] = update.observation_state
+            if update.breached_at is not None:
+                breached_at.setdefault(update.observation_timeframe, update.breached_at)
             extreme = (
                 min(extreme, update.extreme)
                 if episode.direction.value == "bullish"
@@ -169,8 +177,11 @@ class RaidEpisodeStore:
             update={
                 "available_at": available_at,
                 "raid_candidate_ids": list(dict.fromkeys(raid_ids)),
+                "first_raid_candidate_id": first_raid_candidate_id,
                 "observation_fact_ids": list(dict.fromkeys(observation_ids)),
                 "observed_timeframes": list(dict.fromkeys(timeframes)),
+                "observation_states": states,
+                "breached_at": breached_at,
                 "extreme": extreme,
             },
             deep=True,

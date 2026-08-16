@@ -195,16 +195,30 @@ append observations to the same `RaidEpisode`; they do not make the reference
 untaken again. Each episode creates independent H1 and M15 setup paths, with M5
 as the entry timeframe and M1 reserved for refinement evidence.
 
+The global episode begins at the first breach, before a reclaim is required.
+Each observing timeframe has its own append-only `BREACHED -> RECLAIMED` state.
+While a timeframe remains breached, every closed bar updates the episode
+extreme; the reclaim bar need not breach the reference again.
+
 A shift is eligible only when its setup-timeframe candle closes through a
 confirmed swing on that same timeframe in the raid direction. The break and
 SHIFT evidence record the effective append-only STH/ITH/LTH rank visible at
 break time. The shift remains
 `UNCLASSIFIED`; the semantic evaluator decides whether it is noise, internal
 CHoCH, or a meaningful reversal. The linked FVG must be formed by the selected
-repricing candle. Touch records `touched`, `penetration_fraction`, and
+repricing candle. An M5 displacement/FVG may occur inside the M15/H1 shift
+candle before that setup candle closes. Such evidence is not promoted until
+the shift close, and is excluded from the active entry zones if fully filled or
+failed before confirmation. The candidate records `inside_shift_bar` versus
+`after_shift_confirmation` explicitly.
+
+Touch records `touched`, `penetration_fraction`, and
 `favorable_close_outside`. A favorable close may confirm on the touch bar or
 within the following three entry bars. A close through the far edge records an
-explicit `FAILED` zone; expiry is recorded separately.
+explicit `FAILED` zone; expiry is recorded separately. Every touch bar updates
+research-only path aggregates: touch count/times, first and maximum
+penetration, CE/full-fill flags, bars since first touch, closes inside the zone,
+and maximum adverse excursion before reaction.
 
 Every raid/setup origin and transition is append-only. The trading path stays
 terminal after invalidation or expiry, while a separate research observer logs
@@ -245,6 +259,12 @@ The v0 close-acceptance contract is enforced as one close on the setup
 timeframe beyond the raid extreme with zero distance buffer. Alternative
 levels, counts, or buffers are research configurations and must not change the
 recorded v0 default silently.
+
+For a setup-timeframe candle that already contains the lower-timeframe raid,
+causality is decided at candle close: if the setup existed before that close,
+the close may invalidate it even though the candle opened before the raid. The
+comparison uses the last episode extreme available before that candle's new
+observation is merged; the same close then appends the deeper observed extreme.
 
 ## 9. Reference-source roles
 

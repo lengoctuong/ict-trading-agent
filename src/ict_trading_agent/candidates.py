@@ -8,6 +8,7 @@ from .base import NonEmptyStr, SchemaModel
 from .enums import (
     CandidateType,
     Direction,
+    RaidObservationState,
     Session,
     SetupStatus,
     TargetScope,
@@ -105,10 +106,13 @@ class RaidEpisode(SchemaModel):
     direction: Direction
     created_at: AwareDatetime
     available_at: AwareDatetime
-    first_raid_candidate_id: NonEmptyStr
-    raid_candidate_ids: list[NonEmptyStr]
+    first_take_fact_id: NonEmptyStr
+    first_raid_candidate_id: NonEmptyStr | None = None
+    raid_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
     observation_fact_ids: list[NonEmptyStr]
     observed_timeframes: list[Timeframe]
+    observation_states: dict[Timeframe, RaidObservationState]
+    breached_at: dict[Timeframe, AwareDatetime] = Field(default_factory=dict)
     extreme: float = Field(gt=0.0)
 
     @model_validator(mode="after")
@@ -117,10 +121,17 @@ class RaidEpisode(SchemaModel):
             raise ValueError("a raid episode direction cannot be neutral")
         if self.available_at < self.created_at:
             raise ValueError("episode availability cannot precede creation")
-        if self.first_raid_candidate_id not in self.raid_candidate_ids:
+        if (
+            self.first_raid_candidate_id is not None
+            and self.first_raid_candidate_id not in self.raid_candidate_ids
+        ):
             raise ValueError("first raid candidate must belong to the episode")
         if not self.observation_fact_ids or not self.observed_timeframes:
             raise ValueError("a raid episode requires an initial observation")
+        if set(self.observed_timeframes) != set(self.observation_states):
+            raise ValueError("every observed timeframe requires an observation state")
+        if not set(self.observed_timeframes).issubset(self.breached_at):
+            raise ValueError("every observed timeframe requires breached_at")
         return self
 
 
@@ -132,10 +143,14 @@ class RaidEpisodeUpdate(SchemaModel):
     observation_fact_id: NonEmptyStr
     observation_timeframe: Timeframe
     raid_candidate_id: NonEmptyStr | None = None
+    observation_state: RaidObservationState
+    breached_at: AwareDatetime | None = None
     extreme: float = Field(gt=0.0)
 
     @model_validator(mode="after")
     def validate_update(self) -> "RaidEpisodeUpdate":
         if self.available_at < self.occurred_at:
             raise ValueError("episode update availability cannot precede occurrence")
+        if self.breached_at is None:
+            raise ValueError("raid observation updates require breached_at")
         return self

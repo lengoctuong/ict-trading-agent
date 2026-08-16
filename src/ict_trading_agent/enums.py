@@ -234,6 +234,12 @@ class ReferenceStatus(str, Enum):
     TAKEN = "taken"
 
 
+class RaidObservationState(str, Enum):
+    NOT_SEEN = "not_seen"
+    BREACHED = "breached"
+    RECLAIMED = "reclaimed"
+
+
 class StructureReferenceStatus(str, Enum):
     ACTIVE = "active"
     BROKEN = "broken"
