@@ -4,8 +4,13 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
-from ict_trading_agent.detectors import CandleFeatureConfig
+from ict_trading_agent.detectors import (
+    CandleFeatureConfig,
+    PriceBreakDetector,
+    ReferenceLevel,
+)
 from ict_trading_agent.enums import FactType, Session, Timeframe
+from ict_trading_agent.facts import ObservableFact, PriceGeometry
 from ict_trading_agent.m4 import DataQualityError, ExnessCsvLoader, M4ReplayEngine
 from ict_trading_agent.m4_support import (
     CausalReferenceBuilder,
@@ -257,3 +262,35 @@ def test_symbol_metadata_must_match_engine_symbol() -> None:
             ),
             git_commit_sha="abc123",
         )
+
+
+def test_cross_timeframe_breaks_at_same_open_have_distinct_fact_identity() -> None:
+    opened = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    reference = ObservableFact(
+        fact_id="swing-shared",
+        fact_type=FactType.SWING_POINT,
+        symbol="XAUUSD",
+        timeframe=Timeframe.H1,
+        occurred_at=opened - timedelta(hours=2),
+        confirmed_at=opened - timedelta(hours=1),
+        available_at=opened - timedelta(hours=1),
+        geometry=PriceGeometry(price=100.0),
+        metrics={"side": "high", "rank": "short_term"},
+        detector_name="fixture",
+        detector_version="0.1.0",
+    )
+    detector = PriceBreakDetector(tick_size=0.01)
+    m5 = _bar(opened)
+    m15 = m5.model_copy(
+        update={
+            "timeframe": Timeframe.M15,
+            "close_time": opened + timedelta(minutes=15),
+        }
+    )
+    m5 = m5.model_copy(update={"close": 101.0, "high": 101.5})
+    m15 = m15.model_copy(update={"close": 101.0, "high": 101.5})
+
+    m5_break = detector.detect(m5, ReferenceLevel.from_fact(reference))
+    m15_break = detector.detect(m15, ReferenceLevel.from_fact(reference))
+    assert m5_break is not None and m15_break is not None
+    assert m5_break.fact_id != m15_break.fact_id

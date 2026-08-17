@@ -16,7 +16,7 @@ from .levels import ReferenceLevel, validate_reference_for_bar
 
 class PriceBreakDetector:
     name = "PriceBreakDetector"
-    version = "0.1.0"
+    version = "0.1.1"
 
     def __init__(self, *, tick_size: float) -> None:
         if tick_size <= 0:
@@ -46,6 +46,7 @@ class PriceBreakDetector:
             fact_id=stable_fact_id(
                 FactType.PRICE_BREAK.value,
                 reference.reference_fact_id,
+                bar.timeframe.value,
                 bar.open_time.isoformat(),
             ),
             fact_type=FactType.PRICE_BREAK,

@@ -30,7 +30,7 @@ class ReferenceLevel(SchemaModel):
     available_at: AwareDatetime
 
     @model_validator(mode="after")
-    def validate_reference_type(self) -> "ReferenceLevel":
+    def validate_reference_type(self) -> ReferenceLevel:
         if self.fact_type not in REFERENCE_FACT_TYPES:
             raise ValueError("unsupported reference-level fact type")
         if self.price <= 0:
@@ -38,7 +38,7 @@ class ReferenceLevel(SchemaModel):
         return self
 
     @classmethod
-    def from_fact(cls, fact: ObservableFact) -> "ReferenceLevel":
+    def from_fact(cls, fact: ObservableFact) -> ReferenceLevel:
         if fact.fact_type not in REFERENCE_FACT_TYPES:
             raise ValueError("fact is not a supported reference level")
         if fact.geometry is None or fact.geometry.price is None:
@@ -72,7 +72,7 @@ def validate_reference_for_bar(bar: OHLCBar, reference: ReferenceLevel) -> None:
 
 class LevelInteractionDetector:
     name = "LevelInteractionDetector"
-    version = "0.1.0"
+    version = "0.1.1"
 
     def __init__(self, *, tick_size: float) -> None:
         if tick_size <= 0:
@@ -125,6 +125,7 @@ class LevelInteractionDetector:
             fact_id=stable_fact_id(
                 FactType.LEVEL_BREACH.value,
                 reference.reference_fact_id,
+                bar.timeframe.value,
                 bar.open_time.isoformat(),
             ),
             fact_type=FactType.LEVEL_BREACH,
@@ -146,6 +147,7 @@ class LevelInteractionDetector:
             fact_id=stable_fact_id(
                 FactType.LEVEL_RECLAIM.value,
                 reference.reference_fact_id,
+                bar.timeframe.value,
                 bar.open_time.isoformat(),
             ),
             fact_type=FactType.LEVEL_RECLAIM,
@@ -199,6 +201,7 @@ class LevelInteractionDetector:
             fact_id=stable_fact_id(
                 FactType.LEVEL_RECLAIM.value,
                 breach.fact_id,
+                bar.timeframe.value,
                 bar.open_time.isoformat(),
             ),
             fact_type=FactType.LEVEL_RECLAIM,
