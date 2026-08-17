@@ -161,11 +161,13 @@ replay, JSONL export, and M4.2 analysis, with 369.5 MB process-tree working set
 and 332.3 MB private bytes. It reduced meaningful raid observations from 24,690
 to 7,704. After the cross-timeframe transition semantic correction, the same
 week produced 1,844 price-break/structure-break events instead of 2,286 while
-preserving raid, shift, FVG, setup, and near-miss summaries. Two fresh wall
-clock runs took about 40–45 seconds, so the <=30-second week performance gate
-is currently OPEN again. The first post-change memory harness tracked the venv
-launcher rather than its child process and is invalid; it must be repeated with
-a correct process-tree monitor before asserting the memory gate.
+preserving raid, shift, FVG, setup, and near-miss summaries. The first external
+PowerShell monitor distorted wall-clock measurements and incorrectly observed
+the venv launcher. The pilot script now samples its own Windows process
+counters. Two fresh in-process measurements completed in 16.944 and 12.878
+seconds, with peak working set <=340.7 MiB and private bytes <=321.6 MiB. The
+<=30-second / <400 MiB one-week M4-PERF gate passes; this does not close the
+separate monitored full-range replay gate.
 
 The `run_id` is the stable hash of that complete manifest. A config, calendar,
 source file, metadata, policy, or code-revision change therefore creates a new

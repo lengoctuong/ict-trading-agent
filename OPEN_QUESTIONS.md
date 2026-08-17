@@ -46,19 +46,17 @@ means that design is enforced by code and tests.
    queue is generated with status `PENDING_USER_REVIEW`. No machine-generated
    ICT verdict is treated as approved chart evidence.
 
-9. **M4-PERF re-benchmark and full-range replay — OPEN.** The cross-timeframe
-   close-transition fix removes repeated lower-timeframe interactions while
-   price remains beyond a higher-timeframe swing. The same one-week cached
-   replay now takes about 40–45 seconds, above the <=30-second gate; the
-   process-tree memory measurement must also be repeated because the first
-   post-change harness observed only the Windows venv launcher. Profile before
-   introducing streaming or evidence redesign. The complete cached warmup +
-   analysis range remains a separately monitored long research job before
-   freezing full-range M4.2 artifacts.
+9. **Full-range replay completion — OPEN, non-blocking after week gate.** The
+   cross-timeframe close-transition fix removes repeated lower-timeframe
+   interactions while price remains beyond a higher-timeframe swing. The
+   in-process one-week cached replay gate passes at 12.878–16.944 seconds,
+   <=340.7 MiB peak working set, and <=321.6 MiB private bytes. The complete
+   cached warmup + analysis range remains a separately monitored long research
+   job before freezing full-range M4.2 artifacts.
 
 ## Resolved and implemented
 
-- **M4 performance semantic hardening — IMPLEMENTED; runtime gate OPEN.** Raid
+- **M4 performance hardening — IMPLEMENTED for the blocking week gate.** Raid
   observations emit only on breach/state/extreme changes; setup evidence is
   separate from lifecycle transitions; swing hierarchy, reference lookup, and
   setup scheduling are incremental/indexed; research payloads and JSONL output

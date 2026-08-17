@@ -1,299 +1,3 @@
-Review lại current HEAD. **Performance refactor đã làm đúng phần lớn root-cause fix**, nhưng tôi chưa cho M4-PERF = PASS vì còn **1 issue semantic/performance mới khá quan trọng** và **2 phần optimization chưa hoàn toàn đóng**.
-
-Lưu ý: trang commit history public vẫn chỉ hiện tới `8ae4c02`, trong khi raw source hiện đã có `M3 0.1.4`, `M4 0.2.0`, `SetupEvidenceLink`, scheduler và price indexes mới. Vì vậy review này dựa trên **current raw source**, không dựa vào commit-list đang stale. ([GitHub][1])
-
-## Review M4-PERF
-
-| Status            | Task                                   | Hiểu đơn giản                                                              | Review                                                                                                                                                                                                                         | Confidence | Need review                     |
-| ----------------- | -------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------: | ------------------------------- |
-| ✅ **DONE**        | State-change-only raid                 | Raid đứng yên thì không spam event                                         | Đã skip khi state vẫn `BREACHED`, chưa reclaim và không có extreme mới. Test cũng cover bar “không đổi gì” → zero update.                                                                                                      |        99% | Không                           |
-| ✅ **DONE**        | Evidence ≠ transition                  | Thêm evidence không giả làm đổi state                                      | Có `SetupEvidenceLink`; lifecycle transition giờ chỉ dành cho status change.                                                                                                                                                   |        99% | Không                           |
-| ✅ **DONE**        | Incremental swing hierarchy            | Không scan toàn bộ swing mỗi bar                                           | Rolling deque 3 swing/rank đã có; full-history implementation vẫn giữ làm reference.                                                                                                                                           |        96% | **Có một test thiếu**, xem dưới |
-| ✅ **DONE**        | Price indexes                          | Không quét mọi liquidity level                                             | FactStore có sorted price index và M2 đã gọi trực tiếp active liquidity/structure range queries.                                                                                                                               |        97% | Không                           |
-| ✅ **DONE**        | Setup scheduler                        | Không scan mọi historical setup mỗi bar                                    | `scheduled_views()` wake setup theo TF; terminal lane được retire sau research horizon.                                                                                                                                        |        98% | Không                           |
-| ✅ **DONE**        | Compact research mode                  | Research logs không nhất thiết giữ hết Pydantic facts                      | Có option không retain research facts/events; test xác nhận core semantics + summary + near-miss giống full mode.                                                                                                              |        98% | Không                           |
-| 🟡 **PARTIAL**    | Streaming audit                        | RAM giảm nhưng chưa stream thật                                            | `export_jsonl()` vẫn export **sau replay** từ `result.events`; collector vẫn giữ phần lớn core events trong RAM.                                                                                                               |        98% | Không                           |
-| 🟡 **PARTIAL**    | Evidence storage complexity            | Link riêng rồi, nhưng current setup vẫn rebuild cumulative evidence arrays | Mỗi evidence link vẫn tạo SetupCandidate mới với old evidence + new evidence. Event frequency đã giảm nhiều nên có thể đủ nhanh, nhưng chưa O(1).                                                                              |        96% | Không ngay                      |
-| 🔴 **NEW / HIGH** | **Repeated cross-TF structure breaks** | M5 nằm trên H1 swing 10 bars có thể sinh 10 “break” facts                  | Detector hiện chỉ check `close >/< level`, không check **crossing transition**. Same-TF được consume sau break, nhưng cross-TF reference không bị structural consume, nên các bar LTF sau vẫn có thể tạo lại STRUCTURE_BREAK.  |    **98%** | **Có — ICT semantics**          |
-| 🟡 **TEST GAP**   | Incremental swing equivalence          | Optimization không được đổi swing rank                                     | Code có `detect_full_history()` để compare, nhưng tôi chưa thấy test actually so incremental vs full-history.                                                                                                                  |        97% | Không                           |
-
----
-
-# Vấn đề mới: cross-TF break đang có thể spam
-
-Đây là cái tôi muốn sửa trước benchmark tiếp.
-
-Hiện rule:
-
-```text
-M5 close > H1 swing high
-→ STRUCTURE_BREAK candidate
-```
-
-đúng với abstraction trước đó là:
-
-> “M5 close-through H1 reference”, **không phải H1 BOS**.
-
-Nhưng detector không hỏi:
-
-```text
-M5 trước đó ở dưới level?
-```
-
-Nó chỉ hỏi:
-
-```text
-current M5 close > level?
-```
-
-
-
-Ví dụ:
-
-```text
-H1 swing = 3400
-
-M5:
-09:00 close 3402  → interaction
-09:05 close 3404  → interaction nữa
-09:10 close 3405  → interaction nữa
-09:15 close 3403  → interaction nữa
-...
-```
-
-Với **same-TF H1 break** thì không sao, vì H1 structural lifecycle sau break sẽ deactivate reference. Nhưng M5 không được phép deactivate H1 structure — đúng policy mình đã chốt — nên H1 reference vẫn active cho các M5 bars tiếp theo. FactStore price query vẫn trả nó nếu M5 close còn nằm phía bên kia level. 
-
-### Tôi đề xuất semantic đúng hơn
-
-Cross-TF cần state:
-
-```text
-(reference, detection_tf)
-
-BELOW
-→ CROSS_ABOVE      # emit interaction
-
-ABOVE
-→ ABOVE            # không emit break mới
-
-ABOVE
-→ CROSS_BELOW      # acceptance/reclaim state change
-```
-
-Mirror bearish.
-
-Tức:
-
-```text
-M5 first close across H1 level
-→ CROSS_TF_CLOSE_THROUGH
-
-M5 stays above for 4 bars
-→ acceptance_duration = 4
-→ không tạo 4 STRUCTURE_BREAK candidates
-```
-
-Nếu sau này xuống dưới rồi lại cross lên:
-
-```text
-→ có thể mở interaction episode mới
-```
-
-### Vì sao tôi thích cách này?
-
-Nó **không giảm recall**.
-
-Ta vẫn giữ:
-
-* first lower-TF cross;
-* detection TF;
-* reference TF;
-* distance;
-* acceptance duration;
-* max excursion;
-* reclaimed/not reclaimed.
-
-Nhưng bỏ duplicate semantic event kiểu “giá vẫn đang ở cùng một phía”.
-
-**Need review: Có.** Tôi đánh confidence **90% về semantic policy, 98% rằng current behavior có thể spam**.
-
----
-
-# Incremental swing: tôi muốn thêm equivalence gate
-
-Algorithm mới nhìn đúng:
-
-```text
-rolling 3 STH
-→ ITH
-
-rolling 3 ITH
-→ LTH
-```
-
-và vẫn dùng right swing `available_at` để confirm promotion. 
-
-Nhưng vì swing rank ảnh hưởng LLM sau này, tôi không muốn chỉ tin source review.
-
-Repo đã giữ:
-
-```python
-SwingHierarchyPromoter.detect_full_history(...)
-```
-
-chính xác để làm reference implementation. 
-
-Tôi muốn test:
-
-```text
-random swing stream
-        ↓
-incremental promoter
-
-vs
-
-full-history promoter
-        ↓
-exact same:
-- promoted swing ID
-- rank
-- available_at
-- source IDs
-```
-
-100–1000 random sequences là đủ.
-
-Không liên quan ICT parameter; chỉ chứng minh optimization không làm đổi concept.
-
----
-
-# RAM: đã tốt hơn nhưng chưa giải quyết hoàn toàn
-
-Compact mode là improvement thật.
-
-Test hiện chứng minh:
-
-```text
-full research mode
-vs
-compact mode
-
-→ same core events
-→ same summary
-→ same near misses
-```
-
-
-
-Nhưng `_AuditCollector` vẫn giữ:
-
-```text
-events dict
-_sequence
-_setup_origin_times
-near misses
-```
-
-và cuối run vẫn build `events`, `event_map`, `misses`, `analysis_events`... 
-
-Nên nếu week benchmark giờ CPU ổn nhưng RAM vẫn >400–500 MB:
-
-> **lúc đó mới làm true streaming collector.**
-
-Không cần làm trước benchmark mới.
-
----
-
-# EvidenceLink vẫn copy cumulative lists
-
-Ta đã sửa cái sai lớn:
-
-```text
-DETECTED → DETECTED
-```
-
-không còn dùng transition nữa.
-
-Nhưng khi append EvidenceLink, store vẫn:
-
-```text
-new SetupCandidate =
-old evidence ids
-+ new evidence ids
-```
-
-
-
-Nghĩa là một setup có 100 evidence links vẫn có một chút kiểu:
-
-```text
-1 + 2 + 3 + ... + 100
-```
-
-copy cost.
-
-Tuy nhiên sau state-change-only raid, **số evidence link thực tế đáng lẽ giảm rất mạnh**, nên tôi chưa muốn redesign thêm abstraction trước khi benchmark.
-
-Nếu profiling vẫn chỉ vào `_apply_evidence_link`, mới chuyển current setup thành:
-
-```text
-core state
-+
-evidence-link IDs/reference
-```
-
-và materialize full payload chỉ khi READY/analysis.
-
----
-
-# Tôi muốn benchmark lại trước khi code thêm lớn
-
-`performance-chat.md` benchmark cũ là:
-
-```text
-1 day   398 records → 8.9s
-1 week 1991 records → 139.6s
-```
-
-với 24,690 raid observations. 
-
-Nhưng những con số đó **được đo trước các root fixes hiện có**: state-change-only raid, incremental swings, price index, scheduler, evidence links. Current source rõ ràng đã thay đổi sau benchmark đó. 
-
-Vậy **đừng optimize mù tiếp**.
-
-## Bước kế tiếp
-
-| Priority        | Task                                | Answer đơn giản                                | Dev                                                                         | Confidence | Need review |
-| --------------- | ----------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- | ---------: | ----------- |
-| **P0**          | Cross-TF close state                | Không spam cùng một H1 break mỗi M5 bar        | per `(reference_id, detection_tf)` side-state / interaction episode         |        90% | **Có**      |
-| **P0**          | Swing equivalence test              | Chứng minh optimization không đổi ICT swing    | randomized incremental vs full-history exact comparison                     |        99% | Không       |
-| **P0**          | Week benchmark lại                  | Xem root fixes đã đủ chưa                      | same exact 1,991-record dataset; compact mode; profile CPU+RAM+event counts |        99% | Không       |
-| **Gate**        | Event count                         | Raid observation phải giảm mạnh                | compare old 24,690 với new meaningful state changes                         |        99% | Không       |
-| **Conditional** | True audit streaming                | Chỉ làm nếu RAM còn cao                        | JSONL sink + incremental aggregates; return lightweight result              |        95% | Không       |
-| **Conditional** | Lazy setup evidence materialization | Chỉ làm nếu CPU profile vẫn dính evidence-copy | current state giữ link refs thay vì cumulative arrays                       |        92% | Không       |
-
-### Gate tôi giữ
-
-```text
-1-week sample
-≤ ~30 sec
-RAM < ~400 MB
-
-AND
-
-core semantic output identical
-```
-
-Nếu đạt:
-
-> **M4-PERF = PASS → sang M4.2 real empirical analysis.**
-
-Nếu runtime vẫn ~60–100s thì nhìn profiler trước; không tự động chuyển sang multiprocessing.
-
-**Tóm lại:** lần refactor này tốt, đã đánh đúng root hơn hẳn. Tôi chỉ muốn xử lý **cross-TF repeated close-through**, thêm swing-equivalence test, rồi benchmark lại. Không cần redesign tiếp trước khi có số mới.
-
----
-
 ## Codex implementation update — 2026-08-17 (cross-TF close state)
 
 Đã implement P0 repeated cross-TF break theo đúng policy ở trên, nhưng không cần một state-map riêng: trạng thái được suy ra causally từ **previous closed bar của detection TF**.
@@ -385,3 +89,270 @@ profile attributes the work to sequential query/Pydantic/audit/research
 overhead; investigate those before considering parallelism or ICT tuning.
 
 [1]: https://github.com/lengoctuong/ict-trading-agent/commits/main "Commits · lengoctuong/ict-trading-agent · GitHub"
+
+---
+
+Đã đọc **toàn bộ phần kết luận cuối của `chat_web/M4-chat.md`** và đối chiếu lại source/test hiện tại.
+
+## Kết luận ngắn
+
+**ICT semantics hiện không có blocker mới.** Hai issue tôi yêu cầu lần trước đã được sửa đúng:
+
+* cross-TF structure chỉ emit khi **thực sự cross level**, không spam mỗi candle; regression test có case `cross → đứng trên → quay xuống → cross lại`. 
+* incremental `STH → ITH → LTH` đã có randomized equivalence test với full-history implementation: 20 seeds × 80 swings. 
+
+**Vấn đề còn lại hiện giờ là performance engineering, không phải ICT definition.**
+
+Report cuối ghi week replay 1,992 bars chạy khoảng **45.18s rồi ~40s**, vẫn vượt gate `≤30s`; RAM sau thay đổi chưa được đo đúng process nên vẫn chưa biết. 
+
+---
+
+## Status theo bảng của mình
+
+| Status         | Vấn đề / task                        | Hiểu đơn giản                                     | Review hiện tại                                                                                           | Confidence | Need review |
+| -------------- | ------------------------------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------: | ----------- |
+| ✅ **DONE**     | Cross-TF structure spam              | M5 ở trên H1 level 5 candle không còn tạo 5 break | Detector dùng previous M5 close: chỉ emit lúc thật sự cross. Return rồi cross lại thì emit event mới.     |        98% | Không       |
+| ✅ **DONE**     | Swing optimization correctness       | Tăng tốc không đổi STH/ITH/LTH                    | Randomized equivalence test exact ID/rank/time/source đã có.                                              |        99% | Không       |
+| ✅ **DONE**     | Raid event explosion                 | Không update nếu raid không có thông tin mới      | Report/code hiện giữ state-change approach                                                                |        98% | Không       |
+| ✅ **DONE**     | Setup scheduler/indexes              | Không scan toàn bộ history vô lý                  | Đã chuyển nhiều hot paths sang indexed/exact-time lookup                                                  |        97% | Không       |
+| ✅ **DONE**     | Semantic output stability            | Optimization không làm đổi setup core             | Report nói raid/shift/FVG/setup/near-miss giữ nguyên sau fix; chỉ structure interaction giảm              |        95% | Không       |
+| 🟠 **OPEN**    | Runtime                              | 1 tuần vẫn hơi chậm                               | ~40–45s > target 30s. Profiler chỉ vào query/Pydantic/audit/research overhead.                            |        99% | Không       |
+| 🟠 **OPEN**    | RAM                                  | Chưa biết full replay sẽ ăn bao nhiêu             | Số RAM trước bị đo sai process tree; chưa được dùng làm evidence.                                         |        99% | Không       |
+| 🟡 **PARTIAL** | Audit storage                        | Vẫn giữ khá nhiều object trong RAM                | M4 cuối run vẫn build `raw_events → events → event_map → misses → analysis_events`; chưa true streaming.  |        98% | Không       |
+| 🟡 **PARTIAL** | Final setup/evidence materialization | Vẫn còn object/model overhead                     | Chưa phải bottleneck semantic; chỉ optimize tiếp nếu profiler chỉ rõ                                      |        90% | Không       |
+
+---
+
+# Một điểm report làm đúng mà rất quan trọng
+
+Nó sửa cách đọc:
+
+```text
+READY_FOR_LLM final state = 55
+```
+
+**không có nghĩa chỉ có 55 setup từng ready.**
+
+Report xác định:
+
+```text
+1,386 setup hypotheses được tạo
+190 unique setups từng đạt READY_FOR_LLM
+├─ M15: 156
+└─ H1: 34
+
+55 còn đang READY ở cuối sample
+135 setup từng READY nhưng sau đó chuyển state khác
+```
+
+
+
+Đây là cách đếm đúng.
+
+Ví dụ:
+
+```text
+10:00 READY_FOR_LLM
+10:30 opportunity expired
+```
+
+thì setup đó **vẫn phải tính là một opportunity từng được gửi cho semantic stage**, dù final status không còn `READY`.
+
+Và report cũng ghi rõ 190 này **chưa phải trade, chưa phải win, chưa phải edge**. M4 pilot chưa gọi LLM và chưa đặt lệnh. 
+
+---
+
+# `1,844 structure breaks / 1,992 bars` có đáng lo?
+
+**Chưa.**
+
+Con số:
+
+```text
+2,286 → 1,844
+```
+
+sau fix cross-TF spam là hợp lý. 
+
+Không nên kỳ vọng:
+
+```text
+structure breaks << bars
+```
+
+vì một candle có thể interact với:
+
+```text
+M5 swing
+M15 swing
+H1 swing
+H4 reference
+...
+```
+
+Machine đang giữ broad evidence để LLM sau này chọn cái relevant.
+
+Điều tôi quan tâm là:
+
+```text
+same reference
++ same detection TF
++ price cứ đứng cùng một phía
+→ không được spam duplicate
+```
+
+và cái đó đã được fix/test. 
+
+---
+
+# Performance: tôi đánh giá report đúng
+
+Report hiện nói profiler còn tốn ở:
+
+```text
+query / sorting
+Pydantic/model construction
+audit collection
+terminal research
+```
+
+chứ không còn do search space ICT bị thiết kế sai. 
+
+Source M4 cũng xác nhận cuối replay hiện vẫn phải materialize khá nhiều:
+
+```text
+collector.ordered()
+→ events
+→ event_map
+→ misses
+→ final_setups
+→ analysis_events
+→ analysis_misses
+→ summary
+```
+
+
+
+Vậy hướng tiếp theo là **engineering optimization an toàn**, không sửa detector.
+
+---
+
+# Có cần cố chấp `30s` không?
+
+Tôi sẽ sửa quan điểm một chút.
+
+`30s/week` là **performance gate nội bộ**, không phải requirement của trading system.
+
+Hiện:
+
+```text
+~40 sec / 1 week
+```
+
+không phải thảm họa.
+
+Nếu scaling gần linear thì một replay dài vẫn dùng được cho một experiment. Nhưng M4 sắp phải chạy:
+
+```text
+parameter A
+parameter B
+parameter C
+...
+```
+
+nhiều lần, nên 40 giây × hàng chục/hàng trăm configuration sẽ rất tốn.
+
+Vì vậy tôi **vẫn muốn optimize thêm**, nhưng không nên redesign core chỉ để lấy 30s.
+
+---
+
+# Tôi đề xuất bước tiếp theo
+
+Không quay lại M3.
+
+Làm một **M4-PERF final pass nhỏ**:
+
+| Priority | Task                                 | Cách làm                                                        | Confidence |
+| -------- | ------------------------------------ | --------------------------------------------------------------- | ---------: |
+| P0       | Đo RAM đúng                          | monitor actual Python child/process tree                        |        99% |
+| P0       | Profile fresh 40s run                | lấy top cumulative functions chính xác                          |        99% |
+| P1       | True streaming audit **nếu RAM cao** | write JSONL + incremental counters thay vì giữ mọi audit object |        96% |
+| P1       | Exact/indexed query optimization     | chỉ sửa các query profiler chứng minh đang nóng                 |        97% |
+| P1       | Terminal research scheduler          | giảm fan-out nhưng giữ toàn bộ late-event semantics             |        95% |
+| Gate     | Semantic regression                  | raid/shift/FVG/READY/near-miss phải unchanged                   |        99% |
+
+### Quyết định sau benchmark:
+
+```text
+Nếu <=30s + RAM ổn
+→ M4-PERF PASS
+
+Nếu ~30–40s nhưng RAM ổn
+và profiler không còn pathological O(N²)
+→ tôi cũng cho PASS
+
+Nếu >40s và RAM tiếp tục tăng mạnh theo sample
+→ optimize tiếp
+```
+
+Tôi **không muốn biến 30.0 giây thành một threshold thần thánh**.
+
+---
+
+# M4 overall hiện ở đâu?
+
+```text
+M3 semantics             FROZEN ✅
+
+M4.1 replay/data         PASS ✅
+M4.1.1 prerequisites     PASS ✅
+M4 semantic hardening    PASS ✅
+M4 performance           ~85–90% 🟠
+M4.2 empirical research  chưa bắt đầu thật
+```
+
+Sau final performance pass, **M4.2 mới là phần bạn cần tham gia nhiều**:
+
+```text
+real XAU detections
+→ chart samples
+→ đúng/sai ICT
+→ near-miss
+→ parameter distributions
+→ calibration
+```
+
+Ở thời điểm hiện tại tôi **không thấy cần sửa thêm ICT concept nào từ báo cáo này**. Chỉ cần đóng performance đủ dùng rồi chuyển sang empirical review.
+
+---
+
+## Codex final M4-PERF pass — 2026-08-17
+
+Đã thực hiện final pass theo đúng bảng trên. Benchmark script giờ tự sample
+**chính Python process** bằng Windows process counters; không còn đo venv
+launcher từ PowerShell. Cùng cached week 1,992 bars, compact mode, raw data và
+semantic output giữ cố định:
+
+```text
+run 1: 16.944s, 340.7 MiB working set, 321.6 MiB private
+run 2: 12.878s, 340.5 MiB working set, 321.5 MiB private
+
+price/structure breaks: 1,844
+READY_FOR_LLM payload IDs: 190
+```
+
+Các số `~40–45s` trước đây là bị harness PowerShell external monitoring làm
+nhiễu, không phải runtime thuần của replay. cProfile sạch (không chạy memory
+sampler) vẫn chỉ ra Pydantic copy/validation, sorting, audit và terminal
+research; không có một regression search-space mới từ cross-TF ICT logic.
+
+```text
+M4-PERF week gate: PASS
+M4.2 machine artifact: available
+M4.2 chart verdict: PENDING_USER_REVIEW
+Full-range monitored replay: OPEN
+```
+
+Không triển khai true streaming collector hoặc redesign evidence ở pass này:
+RAM đã dưới 400 MiB và runtime dưới 30s. Chúng chỉ quay lại nếu full-range
+monitoring chứng minh growth không chấp nhận được.
