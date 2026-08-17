@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ict_trading_agent.candidates import ConceptCandidate, TargetCandidate
+from ict_trading_agent.candidates import (
+    ConceptCandidate,
+    SetupCandidate,
+    TargetCandidate,
+)
 from ict_trading_agent.detectors import CandleFeatureConfig
 from ict_trading_agent.enums import (
     CandidateType,
@@ -25,7 +29,6 @@ from ict_trading_agent.stores import CandidateStore, FactStore, SetupStore
 from ict_trading_agent.structure_lifecycle import StructureLifecycleTracker
 from ict_trading_agent.swing_hierarchy import SwingHierarchyPromoter
 
-UTC = timezone.utc
 T0 = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
 
 
@@ -199,6 +202,57 @@ def run_sequence(
             m3.process_latest(timeframe=Timeframe.M5, as_of=bars[index].close_time)
         )
     return batches, facts, candidates, setups
+
+
+def test_same_time_evidence_merges_have_distinct_transition_identity() -> None:
+    feed = ClosedBarFeed("XAUUSD")
+    setups = SetupStore()
+    setup = SetupCandidate(
+        setup_candidate_id="setup-transition-identity",
+        setup_type="ict_intraday_v0",
+        setup_version="0.1.0",
+        symbol="XAUUSD",
+        direction=Direction.BULLISH,
+        setup_timeframe=Timeframe.M15,
+        entry_timeframe=Timeframe.M5,
+        created_at=T0,
+        available_at=T0,
+        status=SetupStatus.DETECTED,
+        evidence_candidate_ids=[],
+        evidence_fact_ids=[],
+    )
+    setups.append_setup(setup)
+    pipeline = M3SetupPipeline(
+        bar_feed=feed,
+        fact_store=FactStore(),
+        candidate_store=CandidateStore(),
+        setup_store=setups,
+        tick_size=0.1,
+    )
+    available_at = T0 + timedelta(minutes=5)
+
+    first = pipeline._append_transition(
+        setup,
+        SetupStatus.DETECTED,
+        T0,
+        available_at,
+        evidence_fact_ids=["observation-a"],
+        reason_codes=["RAID_EPISODE_EVIDENCE_MERGED"],
+    )
+    second = pipeline._append_transition(
+        setup,
+        SetupStatus.DETECTED,
+        T0,
+        available_at,
+        evidence_fact_ids=["observation-b"],
+        reason_codes=["RAID_EPISODE_EVIDENCE_MERGED"],
+    )
+
+    assert first.transition_id != second.transition_id
+    assert setups.current_view(setup.setup_candidate_id).evidence_fact_ids == [
+        "observation-a",
+        "observation-b",
+    ]
 
 
 def ready_bars() -> list[OHLCBar]:

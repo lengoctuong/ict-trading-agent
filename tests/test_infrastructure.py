@@ -83,6 +83,35 @@ def test_closed_bar_feed_rejects_developing_and_future_bars() -> None:
         feed.append(overlapping, observed_at=overlapping.close_time)
 
 
+def test_closed_bar_feed_indexes_bar_distance_without_history_scan() -> None:
+    feed = ClosedBarFeed("XAUUSD")
+    bars = [
+        bar(index * 5, open_=100, high=102, low=99, close=101)
+        for index in range(3)
+    ]
+    for item in bars:
+        feed.append(item, observed_at=item.close_time)
+
+    assert feed.index_of_open(Timeframe.M5, bars[1].open_time) == 1
+    assert feed.index_of_close(Timeframe.M5, bars[2].close_time) == 2
+    assert (
+        feed.count_closed_between(
+            Timeframe.M5,
+            after=bars[0].close_time,
+            through=bars[2].close_time,
+        )
+        == 2
+    )
+    assert (
+        feed.count_open_between(
+            Timeframe.M5,
+            start=bars[1].open_time,
+            end=bars[2].open_time,
+        )
+        == 2
+    )
+
+
 def test_three_bar_swing_is_strict_and_available_after_right_close() -> None:
     detector = ThreeBarSwingDetector(tick_size=0.1)
     left = bar(0, open_=100, high=101, low=99, close=100)

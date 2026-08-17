@@ -118,7 +118,7 @@ class M2PrimitivePipeline:
     ) -> tuple[M2DetectionBatch, ...]:
         """Resume after the last persisted candle-feature cursor."""
 
-        processed = self.fact_store.visible(
+        processed = self.fact_store.visible_views(
             as_of=as_of,
             symbol=self.bar_feed.symbol,
             timeframe=timeframe,
@@ -159,7 +159,7 @@ class M2PrimitivePipeline:
         if displacement is not None:
             candidates.append(displacement)
 
-        visible_at_open = self.fact_store.visible(
+        visible_at_open = self.fact_store.visible_views(
             as_of=bar.open_time,
             symbol=bar.symbol,
             fact_types={
@@ -181,17 +181,27 @@ class M2PrimitivePipeline:
                 FactType.PREVIOUS_DAY_LEVEL,
             }
         ]
-        liquidity_lifecycle_at_close = self.fact_store.visible(
+        liquidity_lifecycle_at_close = self.fact_store.visible_views(
             as_of=bar.close_time,
             symbol=bar.symbol,
             fact_types={FactType.LEVEL_BREACH, FactType.REFERENCE_STATE},
         )
+        taken_reference_ids = {
+            str(fact.metrics["reference_fact_id"])
+            for fact in liquidity_lifecycle_at_close
+            if fact.metrics.get("reference_fact_id") is not None
+        }
+        inactive_structure_ids = {
+            str(fact.metrics["reference_fact_id"])
+            for fact in visible_at_open
+            if fact.fact_type == FactType.STRUCTURE_STATE
+            and fact.metrics.get("reference_fact_id") is not None
+        }
         for reference_fact in reference_facts:
             reference = ReferenceLevel.from_fact(reference_fact)
-            liquidity_eligible = self.reference_lifecycle.is_eligible(
-                reference.reference_fact_id,
-                liquidity_lifecycle_at_close,
-                as_of=bar.close_time,
+            liquidity_eligible = (
+                self.reference_lifecycle.policy.reuse_taken_levels
+                or reference.reference_fact_id not in taken_reference_ids
             )
             if liquidity_eligible:
                 interactions = self.level_interactions.detect(bar, reference)
@@ -212,11 +222,7 @@ class M2PrimitivePipeline:
                     )
             if (
                 reference.fact_type == FactType.SWING_POINT
-                and self.structure_lifecycle.is_eligible(
-                    reference.reference_fact_id,
-                    visible_at_open,
-                    as_of=bar.open_time,
-                )
+                and reference.reference_fact_id not in inactive_structure_ids
             ):
                 price_break = self.price_breaks.detect(bar, reference)
                 if price_break is not None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Protocol
@@ -128,6 +129,10 @@ class ClosedBarFeed:
         self.symbol = symbol.strip()
         self._bars: dict[Timeframe, list[OHLCBar]] = defaultdict(list)
         self._keys: set[tuple[Timeframe, object]] = set()
+        self._open_indexes: dict[Timeframe, dict[object, int]] = defaultdict(dict)
+        self._close_indexes: dict[Timeframe, dict[object, int]] = defaultdict(dict)
+        self._open_times: dict[Timeframe, list[object]] = defaultdict(list)
+        self._close_times: dict[Timeframe, list[object]] = defaultdict(list)
 
     def append(self, bar: OHLCBar, *, observed_at: AwareDatetime) -> None:
         if bar.symbol != self.symbol:
@@ -142,8 +147,13 @@ class ClosedBarFeed:
         existing = self._bars[bar.timeframe]
         if existing and bar.open_time < existing[-1].close_time:
             raise ValueError("bars cannot overlap or be appended out of order")
+        index = len(existing)
         existing.append(bar)
         self._keys.add(key)
+        self._open_indexes[bar.timeframe][bar.open_time] = index
+        self._close_indexes[bar.timeframe][bar.close_time] = index
+        self._open_times[bar.timeframe].append(bar.open_time)
+        self._close_times[bar.timeframe].append(bar.close_time)
 
     def bars(
         self,
@@ -164,3 +174,29 @@ class ClosedBarFeed:
     ) -> OHLCBar | None:
         visible = self.bars(timeframe, as_of=as_of)
         return visible[-1] if visible else None
+
+    def index_of_open(self, timeframe: Timeframe, open_time: AwareDatetime) -> int:
+        return self._open_indexes[timeframe][open_time]
+
+    def index_of_close(self, timeframe: Timeframe, close_time: AwareDatetime) -> int:
+        return self._close_indexes[timeframe][close_time]
+
+    def count_closed_between(
+        self,
+        timeframe: Timeframe,
+        *,
+        after: AwareDatetime,
+        through: AwareDatetime,
+    ) -> int:
+        close_times = self._close_times.get(timeframe, [])
+        return bisect_right(close_times, through) - bisect_right(close_times, after)
+
+    def count_open_between(
+        self,
+        timeframe: Timeframe,
+        *,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> int:
+        open_times = self._open_times.get(timeframe, [])
+        return bisect_right(open_times, end) - bisect_left(open_times, start)

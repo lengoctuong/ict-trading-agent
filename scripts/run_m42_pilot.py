@@ -94,9 +94,14 @@ def main() -> None:
     analysis_end = _aware_utc(args.analysis_end)
     output = Path(args.output)
     symbol = args.symbol
+    calendar_end = (
+        max(analysis_end.date(), DEFAULT_ANALYSIS_END.date())
+        if args.reuse_raw
+        else analysis_end.date()
+    )
     calendar = ExnessXauCalendarPreset().build(
         start_date=replay_start.date(),
-        end_date=analysis_end.date(),
+        end_date=calendar_end,
         exceptional_closures=_exceptional_closures(),
     )
     calendar.metadata.update(
