@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import subprocess
+import sys
 from datetime import UTC, datetime, time
 from pathlib import Path
+from threading import Event, Thread
+from time import perf_counter
+from typing import Self
 
 from ict_trading_agent.detectors import CandleFeatureConfig
 from ict_trading_agent.enums import Timeframe
@@ -30,6 +35,108 @@ DEFAULT_ANALYSIS_START = datetime(2026, 6, 1, tzinfo=UTC)
 DEFAULT_ANALYSIS_END = datetime(2026, 8, 17, tzinfo=UTC)
 
 
+class _ProcessMemoryCountersEx(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("page_fault_count", ctypes.c_ulong),
+        ("peak_working_set_size", ctypes.c_size_t),
+        ("working_set_size", ctypes.c_size_t),
+        ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+        ("quota_paged_pool_usage", ctypes.c_size_t),
+        ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+        ("quota_non_paged_pool_usage", ctypes.c_size_t),
+        ("pagefile_usage", ctypes.c_size_t),
+        ("peak_pagefile_usage", ctypes.c_size_t),
+        ("private_usage", ctypes.c_size_t),
+    ]
+
+
+class ProcessMetricsSampler:
+    """Sample the actual Python process, avoiding Windows venv launcher ambiguity."""
+
+    def __init__(self, *, sample_interval_seconds: float = 0.05) -> None:
+        self.sample_interval_seconds = sample_interval_seconds
+        self._started_at: float | None = None
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._peak_working_set_bytes = 0
+        self._peak_private_bytes = 0
+        self._samples = 0
+
+    def __enter__(self) -> Self:
+        return self.start()
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+    def start(self) -> Self:
+        if self._started_at is not None:
+            raise RuntimeError("process metrics sampler is already running")
+        self._started_at = perf_counter()
+        self._sample()
+        self._thread = Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        if self._started_at is None:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        self._sample()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.sample_interval_seconds):
+            self._sample()
+
+    def _sample(self) -> None:
+        self._samples += 1
+        if sys.platform != "win32":
+            return
+        counters = _ProcessMemoryCountersEx()
+        counters.cb = ctypes.sizeof(counters)
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.restype = ctypes.c_void_p
+        get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_process_memory_info.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(_ProcessMemoryCountersEx),
+            ctypes.c_ulong,
+        )
+        get_process_memory_info.restype = ctypes.c_int
+        process = get_current_process()
+        success = get_process_memory_info(
+            process,
+            ctypes.byref(counters),
+            counters.cb,
+        )
+        if not success:
+            raise ctypes.WinError()
+        self._peak_working_set_bytes = max(
+            self._peak_working_set_bytes,
+            int(counters.working_set_size),
+        )
+        self._peak_private_bytes = max(
+            self._peak_private_bytes,
+            int(counters.private_usage),
+        )
+
+    def snapshot(self) -> dict[str, int | float | str | None]:
+        elapsed = (
+            perf_counter() - self._started_at if self._started_at is not None else None
+        )
+        return {
+            "measurement": "in_process",
+            "platform": sys.platform,
+            "sample_interval_ms": round(self.sample_interval_seconds * 1_000),
+            "sample_count": self._samples,
+            "elapsed_seconds": round(elapsed, 3) if elapsed is not None else None,
+            "peak_working_set_bytes": self._peak_working_set_bytes,
+            "peak_private_bytes": self._peak_private_bytes,
+        }
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the first M4.2 Exness XAU pilot")
     parser.add_argument("--env-file", default=".env.mt5.local")
@@ -53,6 +160,11 @@ def _arguments() -> argparse.Namespace:
         "--debug-steps",
         action="store_true",
         help="Retain per-close replay steps; disabled by default for research runs",
+    )
+    parser.add_argument(
+        "--no-process-metrics",
+        action="store_true",
+        help="Disable in-process metrics for cProfile or other external profilers",
     )
     return parser.parse_args()
 
@@ -125,6 +237,9 @@ def main() -> None:
                 "manually enumerated named 2026 holidays; never auto-whitelist gaps"
             ),
         }
+    )
+    metrics_sampler = (
+        None if args.no_process_metrics else ProcessMetricsSampler().start()
     )
     datasets = []
     raw = output / "raw"
@@ -262,6 +377,8 @@ def main() -> None:
         entry_timeframe=Timeframe.M5,
     ).analyze(replay, all_bars, generated_at=datetime.now(UTC))
     research_paths = bundle.export(output / "research")
+    if metrics_sampler is not None:
+        metrics_sampler.stop()
     summary = {
         "run_id": replay.run_id,
         "symbol": replay.symbol,
@@ -278,6 +395,11 @@ def main() -> None:
             for item in replay.data_quality
         ],
         "m42_report": bundle.report.model_dump(mode="json"),
+        "runtime_metrics": (
+            metrics_sampler.snapshot()
+            if metrics_sampler is not None
+            else {"measurement": "disabled_for_external_profiler"}
+        ),
         "replay_outputs": {key: str(value) for key, value in replay_paths.items()},
         "research_outputs": {key: str(value) for key, value in research_paths.items()},
     }
