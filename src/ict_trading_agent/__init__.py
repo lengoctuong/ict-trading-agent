@@ -60,6 +60,15 @@ from .m4_support import (
     SessionContextProvider,
     TemporalContextProvider,
 )
+from .m42 import (
+    DistributionStats,
+    M42ChartReviewItem,
+    M42OutcomeLabel,
+    M42ResearchAnalyzer,
+    M42ResearchBundle,
+    M42ResearchReport,
+    ThresholdCoverage,
+)
 from .market import (
     BarAdjacencyPolicy,
     ClosedBarFeed,
@@ -69,6 +78,12 @@ from .market import (
     OHLCBar,
     WallClockAdjacencyPolicy,
     bars_are_contiguous,
+)
+from .mt5_history import (
+    MT5ConnectionConfig,
+    MT5HistoryClient,
+    MT5HistoryRequest,
+    load_env_file,
 )
 from .pipeline import M2DetectionBatch, M2PrimitivePipeline
 from .presets import CORE_CONCEPT_SPECS
@@ -122,6 +137,7 @@ __all__ = [
     "DataQualityError",
     "DataQualityIssue",
     "DataQualityReport",
+    "DistributionStats",
     "DuplicateRecordError",
     "ExnessBarRecord",
     "ExnessCsvLoader",
@@ -148,6 +164,14 @@ __all__ = [
     "M4StudyWindow",
     "M4Summary",
     "M4SymbolMetadata",
+    "M42ChartReviewItem",
+    "M42OutcomeLabel",
+    "M42ResearchAnalyzer",
+    "M42ResearchBundle",
+    "M42ResearchReport",
+    "MT5ConnectionConfig",
+    "MT5HistoryClient",
+    "MT5HistoryRequest",
     "MarketClosure",
     "MarketSequenceAdjacencyPolicy",
     "MarketState",
@@ -181,6 +205,7 @@ __all__ = [
     "TargetCandidate",
     "TemporalContext",
     "TemporalContextProvider",
+    "ThresholdCoverage",
     "TimeframeHierarchy",
     "TimeframeState",
     "TradeDecision",
@@ -194,4 +219,5 @@ __all__ = [
     "build_xauusd_intraday_v0",
     "can_transition_setup",
     "effective_swing_rank",
+    "load_env_file",
 ]

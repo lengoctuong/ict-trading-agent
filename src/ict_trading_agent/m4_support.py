@@ -187,7 +187,7 @@ class TemporalContextProvider(Protocol):
 class SessionContextProvider:
     """DST-aware annotation only; it never filters bars or setups."""
 
-    version = "0.1.0"
+    version = "0.1.1"
 
     def __init__(self, schedule: SessionSchedule) -> None:
         if not schedule.windows:
@@ -198,10 +198,16 @@ class SessionContextProvider:
     def context_at(self, as_of: AwareDatetime) -> dict[str, Any]:
         local = as_of.astimezone(self.new_york)
         sessions = self.schedule.sessions_at(as_of)
-        primary = self.schedule.primary_session_at(as_of)
+        primary = self.schedule.optional_primary_session_at(as_of)
+        overlap_key = (
+            "+".join(item.value for item in sessions) if len(sessions) > 1 else None
+        )
         return {
-            "session": primary.value,
+            "session": primary.value if primary is not None else None,
+            "primary_session": primary.value if primary is not None else None,
             "sessions": [item.value for item in sessions],
+            "session_overlap": len(sessions) > 1,
+            "session_overlap_key": overlap_key,
             "utc_at": as_of.astimezone(UTC).isoformat(),
             "new_york_at": local.isoformat(),
             "new_york_date": local.date().isoformat(),
@@ -252,7 +258,7 @@ class CausalReferencePolicy(SchemaModel):
 class CausalReferenceBuilder:
     """Build only references whose complete source period is observable as-of."""
 
-    version = "0.1.0"
+    version = "0.1.1"
 
     def __init__(self, policy: CausalReferencePolicy | None = None) -> None:
         self.policy = policy or CausalReferencePolicy()
@@ -361,13 +367,15 @@ class CausalReferenceBuilder:
                 symbol=bar.symbol,
                 timeframe=bar.timeframe,
                 occurred_at=bar.open_time,
-                confirmed_at=bar.close_time,
-                available_at=bar.close_time,
+                confirmed_at=bar.open_time,
+                available_at=bar.open_time,
                 geometry=PriceGeometry(price=bar.open),
                 metrics={
                     "trading_day": local.date().isoformat(),
                     "timezone": policy.true_day_open_timezone,
                     "local_time": policy.true_day_open_local.isoformat(),
+                    "observed_at": bar.close_time.isoformat(),
+                    "observation_policy": "closed_source_bar",
                 },
                 detector_name=type(self).__name__,
                 detector_version=self.version,

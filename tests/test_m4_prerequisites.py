@@ -142,6 +142,34 @@ def test_session_context_is_new_york_dst_aware_without_filtering_policy() -> Non
     assert provider.manifest()["annotation_only"] is True
 
 
+def test_session_context_preserves_unprioritized_overlaps_as_multi_label() -> None:
+    schedule = SessionSchedule(
+        windows=[
+            SessionWindow(
+                session=Session.LONDON,
+                timezone="America/New_York",
+                start_local=time(8, 0),
+                end_local=time(10, 0),
+            ),
+            SessionWindow(
+                session=Session.NY_AM,
+                timezone="America/New_York",
+                start_local=time(9, 0),
+                end_local=time(12, 0),
+            ),
+        ]
+    )
+    context = SessionContextProvider(schedule).context_at(
+        datetime(2026, 8, 3, 13, 30, tzinfo=UTC)
+    )
+
+    assert context["sessions"] == [Session.LONDON.value, Session.NY_AM.value]
+    assert context["session"] is None
+    assert context["primary_session"] is None
+    assert context["session_overlap"] is True
+    assert context["session_overlap_key"] == "london+ny_am"
+
+
 def test_causal_reference_builder_emits_native_d1_levels_only_at_close() -> None:
     opened = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
     builder = CausalReferenceBuilder(CausalReferencePolicy())
@@ -179,10 +207,45 @@ def test_session_levels_and_tdo_require_explicit_clock_and_closed_source_bars() 
     first_facts = builder.ingest(first)
     second_facts = builder.ingest(second)
     assert [item.fact_type for item in first_facts] == [FactType.TRUE_DAY_OPEN]
+    assert first_facts[0].occurred_at == first.open_time
+    assert first_facts[0].confirmed_at == first.open_time
+    assert first_facts[0].available_at == first.open_time
+    assert first_facts[0].metrics["observed_at"] == first.close_time.isoformat()
     assert {item.fact_type for item in second_facts} == {FactType.SESSION_LEVEL}
     assert {item.metrics["side"] for item in second_facts} == {"high", "low"}
     assert all(item.available_at == second.close_time for item in second_facts)
     assert all(item.metrics["source_timeframe"] == "M5" for item in second_facts)
+
+
+def test_tdo_audit_separates_concept_availability_from_closed_bar_observation() -> None:
+    start = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    reference_builder = CausalReferenceBuilder(
+        CausalReferencePolicy(
+            previous_day_from_native_d1=False,
+            true_day_open_source_timeframe=Timeframe.M5,
+            true_day_open_timezone="America/New_York",
+            true_day_open_local=time(5, 0),
+        )
+    )
+    engine = M4ReplayEngine(
+        symbol="XAUUSD",
+        candle_config=CandleFeatureConfig(baseline_period=1),
+        reference_builder=reference_builder,
+        **_identity(),
+    )
+    result = engine.run(
+        [_bar(start + timedelta(minutes=5 * index)) for index in range(4)],
+        study_window=M4StudyWindow(
+            replay_start=start, analysis_start=start + timedelta(seconds=1)
+        ),
+    )
+
+    tdo = next(item for item in result.events if item.category == "true_day_open")
+    assert tdo.occurred_at == start
+    assert tdo.available_at == start
+    assert tdo.observed_at == start + timedelta(minutes=5)
+    first_step = next(item for item in result.steps if item.as_of == tdo.observed_at)
+    assert tdo.event_id in first_step.event_ids
 
 
 def test_symbol_metadata_must_match_engine_symbol() -> None:

@@ -422,6 +422,7 @@ class M4AuditEvent(SchemaModel):
     direction: Direction | None = None
     occurred_at: AwareDatetime
     available_at: AwareDatetime
+    observed_at: AwareDatetime | None = None
     setup_candidate_id: str | None = None
     raid_episode_id: str | None = None
     reason_codes: list[str] = Field(default_factory=list)
@@ -497,6 +498,15 @@ class M4ReplayResult(SchemaModel):
             raise ValueError("replay completion must follow its first bar open")
         if any(item.available_at > self.completed_at for item in self.events):
             raise ValueError("audit event cannot be available after replay completion")
+        if any(
+            item.observed_at is not None
+            and (
+                item.observed_at < item.available_at
+                or item.observed_at > self.completed_at
+            )
+            for item in self.events
+        ):
+            raise ValueError("audit observation must follow availability within replay")
         if self.events != sorted(
             self.events,
             key=lambda item: (item.available_at, item.kind.value, item.event_id),
@@ -507,7 +517,10 @@ class M4ReplayResult(SchemaModel):
             for event_id in step.event_ids:
                 if event_id not in event_map:
                     raise ValueError("replay step references an unknown audit event")
-                if event_map[event_id].available_at != step.as_of:
+                observed_at = (
+                    event_map[event_id].observed_at or event_map[event_id].available_at
+                )
+                if observed_at != step.as_of:
                     raise ValueError("replay step contains an event from another close")
         return self
 
@@ -624,6 +637,7 @@ class _AuditCollector:
             self._add_ready(payload)
 
     def _add_fact(self, fact: ObservableFact) -> None:
+        observed_at = fact.metrics.get("observed_at")
         self._add_model(
             M4EventKind.FACT,
             fact.fact_type.value,
@@ -640,6 +654,11 @@ class _AuditCollector:
                 [str(fact.metrics["reason_code"])]
                 if fact.metrics.get("reason_code")
                 else []
+            ),
+            observed_at=(
+                datetime.fromisoformat(observed_at)
+                if isinstance(observed_at, str)
+                else fact.available_at
             ),
         )
 
@@ -720,6 +739,7 @@ class _AuditCollector:
         setup_candidate_id: str | None = None,
         raid_episode_id: str | None = None,
         reason_codes: Sequence[str] = (),
+        observed_at: datetime | None = None,
     ) -> None:
         self.add(
             M4AuditEvent(
@@ -732,6 +752,7 @@ class _AuditCollector:
                 direction=direction,
                 occurred_at=occurred_at,
                 available_at=available_at,
+                observed_at=observed_at or available_at,
                 setup_candidate_id=setup_candidate_id,
                 raid_episode_id=raid_episode_id,
                 reason_codes=list(reason_codes),
@@ -847,6 +868,16 @@ def _summary(
     research_reasons = Counter(reason for item in facts for reason in item.reason_codes)
     setup_events = [item for item in events if item.kind == M4EventKind.SETUP]
     ready_payloads = [item for item in events if item.kind == M4EventKind.READY_PAYLOAD]
+    session_labels: list[str] = []
+    session_overlaps: list[str] = []
+    for item in ready_payloads:
+        context = item.payload.get("context", {})
+        labels = context.get("sessions") or []
+        if not labels and context.get("session"):
+            labels = [context["session"]]
+        session_labels.extend(str(label) for label in labels)
+        if len(labels) > 1:
+            session_overlaps.append("+".join(str(label) for label in labels))
     breakdowns = {
         "setup_timeframe": dict(
             Counter(
@@ -923,11 +954,9 @@ def _summary(
             )
         ),
         "session": dict(
-            Counter(
-                str(item.payload.get("context", {}).get("session", "unspecified"))
-                for item in ready_payloads
-            )
+            Counter(session_labels or (["unspecified"] if ready_payloads else []))
         ),
+        "session_overlap": dict(Counter(session_overlaps)),
     }
     return M4Summary(
         bars=len(bars),
@@ -976,7 +1005,7 @@ def _summary(
 class M4ReplayEngine:
     """Append bars at their close and run the production M2/M3 path once."""
 
-    version = "0.1.1"
+    version = "0.1.2"
     _timeframe_priority: ClassVar[dict[Timeframe, int]] = {
         Timeframe.M1: 0,
         Timeframe.M5: 1,
@@ -1154,7 +1183,8 @@ class M4ReplayEngine:
             event_ids = [
                 event.event_id
                 for event in collector.ordered()
-                if event.event_id not in before and event.available_at == as_of
+                if event.event_id not in before
+                and (event.observed_at or event.available_at) == as_of
             ]
             steps.append(
                 M4ReplayStep(

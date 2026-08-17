@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
 from ict_trading_agent.detectors import CandleFeatureConfig
-from ict_trading_agent.enums import FactType, SetupStatus, SwingRank, Timeframe
+from ict_trading_agent.enums import FactType, Session, SetupStatus, SwingRank, Timeframe
 from ict_trading_agent.facts import ObservableFact, PriceGeometry
 from ict_trading_agent.m3 import M3Policy
 from ict_trading_agent.m4 import (
@@ -15,8 +15,13 @@ from ict_trading_agent.m4 import (
     M4EventKind,
     M4ReplayEngine,
 )
-from ict_trading_agent.m4_support import M4StudyWindow, M4SymbolMetadata
+from ict_trading_agent.m4_support import (
+    M4StudyWindow,
+    M4SymbolMetadata,
+    SessionContextProvider,
+)
 from ict_trading_agent.market import OHLCBar
+from ict_trading_agent.sessions import SessionSchedule, SessionWindow
 
 T0 = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
 
@@ -154,6 +159,24 @@ def test_exness_loader_rejects_duplicates_and_can_report_gaps_permissively() -> 
 
 def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> None:
     bars = ready_bars()
+    context_provider = SessionContextProvider(
+        SessionSchedule(
+            windows=[
+                SessionWindow(
+                    session=Session.LONDON,
+                    timezone="America/New_York",
+                    start_local=time(4, 0),
+                    end_local=time(6, 0),
+                ),
+                SessionWindow(
+                    session=Session.NY_AM,
+                    timezone="America/New_York",
+                    start_local=time(5, 0),
+                    end_local=time(7, 0),
+                ),
+            ]
+        )
+    )
     engine = M4ReplayEngine(
         symbol="XAUUSD",
         **engine_identity(),
@@ -165,6 +188,7 @@ def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> 
         ],
         candle_config=CandleFeatureConfig(baseline_period=3),
         m3_policy=M3Policy(setup_timeframes=(Timeframe.M5,)),
+        context_provider=context_provider,
     )
 
     result = engine.run(
@@ -180,6 +204,8 @@ def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> 
     assert result.summary.reactions == 1
     assert result.summary.ready_for_llm == 1
     assert result.summary.setups_by_status == {SetupStatus.READY_FOR_LLM.value: 1}
+    assert result.summary.breakdowns["session"] == {"london": 1, "ny_am": 1}
+    assert result.summary.breakdowns["session_overlap"] == {"london+ny_am": 1}
     assert all(event.available_at <= result.completed_at for event in result.events)
     assert [event.available_at for event in result.events] == sorted(
         event.available_at for event in result.events
