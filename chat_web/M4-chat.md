@@ -351,4 +351,37 @@ time to cross-TF ICT logic: profile shows replay query/Pydantic/audit and
 terminal-research overhead. The post-change RAM number is intentionally OPEN
 until a monitor follows the actual Python child/process tree.
 
+### Planner result ledger — cached week 2026-08-10 to 2026-08-17
+
+`READY_FOR_LLM` must be counted from distinct ready-payload setup IDs, not from
+the final-state table. The current compact artifact has:
+
+```text
+setup hypotheses created:              1,386
+unique setups reaching READY_FOR_LLM:    190
+  M15:                                  156
+  H1:                                    34
+duplicate ready payload IDs:              0
+setups still READY at analysis end:       55
+```
+
+The remaining 135 READY arrivals later moved to another terminal outcome within
+the study window; therefore `setups_by_status.ready_for_llm = 55` is a snapshot,
+not the count of opportunities sent to the semantic stage. These are machine
+payloads eligible for an LLM review only: **this pilot did not invoke an LLM,
+place orders, or report PnL**.
+
+Performance history must also stay explicit:
+
+```text
+historical pre-crossing measurement: 18.38s (old gate evidence)
+fresh post-change measurements:      45.18s and about 40s
+current M4-PERF runtime gate:        OPEN / FAILS <=30s target
+```
+
+The fresh runs prove the current checkout is above the target, but do not alone
+prove that the cross-TF semantic correction caused all of the difference. The
+profile attributes the work to sequential query/Pydantic/audit/research
+overhead; investigate those before considering parallelism or ICT tuning.
+
 [1]: https://github.com/lengoctuong/ict-trading-agent/commits/main "Commits · lengoctuong/ict-trading-agent · GitHub"
