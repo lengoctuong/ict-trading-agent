@@ -215,7 +215,11 @@ class M2PrimitivePipeline:
                 reference.fact_type == FactType.SWING_POINT
                 and reference.reference_fact_id in structure_ids
             ):
-                price_break = self.price_breaks.detect(bar, reference)
+                price_break = self.price_breaks.detect(
+                    bar,
+                    reference,
+                    previous_close=bars[index - 1].close,
+                )
                 if price_break is not None:
                     rank = self.fact_store.effective_swing_rank_view(
                         reference.reference_fact_id,

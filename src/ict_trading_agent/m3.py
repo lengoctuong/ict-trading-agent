@@ -481,11 +481,11 @@ class M3SetupPipeline:
     def _m2_processed(self, bar: OHLCBar) -> bool:
         return any(
             fact.occurred_at == bar.open_time
-            for fact in self.fact_store.visible_views(
-                as_of=bar.close_time,
+            for fact in self.fact_store.available_views(
+                at=bar.close_time,
                 symbol=bar.symbol,
                 timeframe=bar.timeframe,
-                fact_type=FactType.CANDLE_FEATURES,
+                fact_types={FactType.CANDLE_FEATURES},
             )
         )
 

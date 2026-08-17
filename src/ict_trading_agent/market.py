@@ -164,7 +164,11 @@ class ClosedBarFeed:
         bars = self._bars.get(timeframe, [])
         if as_of is None:
             return tuple(bars)
-        return tuple(bar for bar in bars if bar.close_time <= as_of)
+        # Close times are append-only and strictly non-overlapping, so a binary
+        # search keeps repeated point-in-time reads from re-scanning all prior
+        # bars during M2/M3 replay.
+        visible_stop = bisect_right(self._close_times.get(timeframe, []), as_of)
+        return tuple(bars[:visible_stop])
 
     def latest(
         self,

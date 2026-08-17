@@ -16,7 +16,7 @@ from .levels import ReferenceLevel, validate_reference_for_bar
 
 class PriceBreakDetector:
     name = "PriceBreakDetector"
-    version = "0.1.1"
+    version = "0.1.2"
 
     def __init__(self, *, tick_size: float) -> None:
         if tick_size <= 0:
@@ -27,7 +27,17 @@ class PriceBreakDetector:
         self,
         bar: OHLCBar,
         reference: ReferenceLevel,
+        *,
+        previous_close: float | None = None,
     ) -> ObservableFact | None:
+        """Detect a favourable close, optionally requiring a cross-TF crossing.
+
+        A same-timeframe reference is structurally consumed after its first
+        confirmed break.  A lower-timeframe close cannot consume a higher-timeframe
+        reference, so it must cross from the non-broken side to avoid emitting the
+        same interaction once per bar while price remains beyond the level.
+        """
+
         validate_reference_for_bar(bar, reference)
         if reference.fact_type != FactType.SWING_POINT:
             raise ValueError("structure breaks require a confirmed swing reference")
@@ -41,6 +51,17 @@ class PriceBreakDetector:
             distance = level - close
         else:
             return None
+
+        same_timeframe = reference.timeframe == bar.timeframe
+        if not same_timeframe and previous_close is not None:
+            prior_close = normalize_to_tick(previous_close, self.tick_size)
+            crossed_from_non_broken_side = (
+                prior_close <= level
+                if reference.side == LiquiditySide.BUY_SIDE
+                else prior_close >= level
+            )
+            if not crossed_from_non_broken_side:
+                return None
 
         return ObservableFact(
             fact_id=stable_fact_id(
@@ -72,8 +93,9 @@ class PriceBreakDetector:
                     else None
                 ),
                 "same_timeframe_structure_eligible": (
-                    reference.timeframe == bar.timeframe
+                    same_timeframe
                 ),
+                "cross_timeframe_close_transition": not same_timeframe,
             },
             detector_name=self.name,
             detector_version=self.version,

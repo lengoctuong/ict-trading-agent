@@ -46,19 +46,24 @@ means that design is enforced by code and tests.
    queue is generated with status `PENDING_USER_REVIEW`. No machine-generated
    ICT verdict is treated as approved chart evidence.
 
-9. **Full-range replay completion — OPEN, non-blocking after week gate.** The
-   required one-week M4-PERF gate passes at 18.38 seconds and 369.5 MB peak
-   working set. The complete cached warmup + analysis range was stopped after
-   three minutes during this patch cycle; it must be run as a separately
-   monitored long research job before freezing full-range M4.2 artifacts.
+9. **M4-PERF re-benchmark and full-range replay — OPEN.** The cross-timeframe
+   close-transition fix removes repeated lower-timeframe interactions while
+   price remains beyond a higher-timeframe swing. The same one-week cached
+   replay now takes about 40–45 seconds, above the <=30-second gate; the
+   process-tree memory measurement must also be repeated because the first
+   post-change harness observed only the Windows venv launcher. Profile before
+   introducing streaming or evidence redesign. The complete cached warmup +
+   analysis range remains a separately monitored long research job before
+   freezing full-range M4.2 artifacts.
 
 ## Resolved and implemented
 
-- **M4 performance hardening — IMPLEMENTED for the blocking week gate.** Raid
+- **M4 performance semantic hardening — IMPLEMENTED; runtime gate OPEN.** Raid
   observations emit only on breach/state/extreme changes; setup evidence is
   separate from lifecycle transitions; swing hierarchy, reference lookup, and
   setup scheduling are incremental/indexed; research payloads and JSONL output
-  are compact. Synthetic/random equivalence tests preserve raid, shift, FVG,
+  are compact. Cross-timeframe close-through emits only on a new detection-TF
+  crossing. Synthetic/random equivalence tests preserve raid, shift, FVG,
   lifecycle, READY, cross-TF recall, IDs, availability, and swing ranks.
 
 - **M3 clock/data policy — IMPLEMENTED.** Exness source timestamps use UTC;

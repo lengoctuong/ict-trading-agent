@@ -503,6 +503,61 @@ def test_cross_tf_close_is_raw_interaction_not_structure_eligible() -> None:
     ]
 
 
+def test_cross_tf_close_through_emits_only_on_each_new_crossing() -> None:
+    bars = [
+        bar(0, open_=100.0, high=101.0, low=99.0, close=100.0),
+        bar(1, open_=100.0, high=101.0, low=99.0, close=100.5),
+        bar(2, open_=100.5, high=102.0, low=100.0, close=101.0),
+        # First M5 close through the active H1 high.
+        bar(3, open_=101.0, high=106.0, low=100.5, close=105.5),
+        # Still above: this is acceptance duration, not another interaction.
+        bar(4, open_=105.5, high=107.0, low=105.0, close=106.0),
+        # Return to the non-broken side; it carries no price-break fact.
+        bar(5, open_=106.0, high=106.5, low=103.0, close=104.5),
+        # A later M5 close through creates a new interaction episode.
+        bar(6, open_=104.5, high=106.0, low=104.0, close=105.5),
+    ]
+    feed = ClosedBarFeed("XAUUSD")
+    for item in bars:
+        feed.append(item, observed_at=item.close_time)
+    facts = FactStore()
+    facts.append(
+        reference_fact(
+            fact_id="h1-swing-high-105-crossing",
+            fact_type=FactType.SWING_POINT,
+            timeframe=Timeframe.H1,
+            side="high",
+            price=105.0,
+        )
+    )
+    candidates = CandidateStore()
+    pipeline = M2PrimitivePipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        tick_size=0.1,
+        candle_config=CandleFeatureConfig(baseline_period=3),
+    )
+    for item in bars[3:]:
+        pipeline.process_latest(timeframe=Timeframe.M5, as_of=item.close_time)
+
+    cross_tf_breaks = [
+        candidate
+        for candidate in candidates.visible(as_of=bars[-1].close_time)
+        if candidate.candidate_type == CandidateType.STRUCTURE_BREAK
+        and candidate.raw_features.get("reference_fact_id")
+        == "h1-swing-high-105-crossing"
+    ]
+    assert [candidate.occurred_at for candidate in cross_tf_breaks] == [
+        bars[3].open_time,
+        bars[6].open_time,
+    ]
+    assert all(
+        candidate.raw_features["cross_timeframe_close_transition"] is True
+        for candidate in cross_tf_breaks
+    )
+
+
 def test_swing_hierarchy_promotions_are_append_only() -> None:
     swings: list[ObservableFact] = []
     for index, price in enumerate((101.0, 105.0, 102.0)):

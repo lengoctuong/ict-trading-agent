@@ -73,9 +73,11 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 
 ## M4 — Replay/backtest harness
 
-Status: M4.1 implemented; M4-PERF week gate passed on cached real Exness data.
-M4.2 machine-generated parameter sensitivity and forward labels run, while
-chart verdicts remain pending user review.
+Status: M4.1 implemented; M4-PERF semantics are hardened, but the week runtime
+gate is OPEN after the cross-timeframe close-transition correction measured
+about 40–45 seconds on cached real Exness data. M4.2 machine-generated
+parameter sensitivity and forward labels run, while chart verdicts remain
+pending user review.
 
 - Native Exness/MT5 CSV/TSV ingestion for XAUUSD with explicit UTC timestamps,
   source spread preservation, and configurable abnormal-spread threshold.
