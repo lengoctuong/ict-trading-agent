@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
@@ -37,7 +37,6 @@ from ict_trading_agent.sessions import SessionSchedule, SessionWindow
 from ict_trading_agent.state import TemporalContext
 from ict_trading_agent.stores import CandidateStore, DuplicateRecordError, FactStore
 
-UTC = timezone.utc
 T0 = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
@@ -231,8 +230,19 @@ def test_fact_store_is_append_only_and_queries_available_at() -> None:
     )[0]
     store = FactStore()
     store.append(fact)
+    assert store.contains(fact.fact_id)
+    assert store.existing_ids([fact.fact_id, "missing"]) == {fact.fact_id}
+    assert store.get_optional("missing") is None
     assert store.visible(as_of=fact.available_at - timedelta(seconds=1)) == ()
     assert store.visible(as_of=fact.available_at) == (fact,)
+    assert store.visible(
+        as_of=fact.available_at,
+        fact_types={FactType.FVG_GEOMETRY, FactType.SWING_POINT},
+    ) == (fact,)
+    assert store.visible(
+        as_of=fact.available_at,
+        fact_types={FactType.SWING_POINT},
+    ) == ()
     with pytest.raises(DuplicateRecordError):
         store.append(fact)
 
@@ -310,6 +320,9 @@ def test_reducer_excludes_future_facts_and_candidates() -> None:
         available_at=T0 + timedelta(hours=1),
     )
     candidate_store.append(future_candidate)
+    assert candidate_store.contains(future_candidate.candidate_id)
+    assert candidate_store.get(future_candidate.candidate_id) == future_candidate
+    assert candidate_store.get_optional("missing") is None
     reducer = MarketStateReducer(
         profile=profile,
         bar_feed=feed,

@@ -191,11 +191,16 @@ def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> 
         context_provider=context_provider,
     )
 
+    progress: list[tuple[int, int, datetime]] = []
     result = engine.run(
         [record(item, index + 2) for index, item in enumerate(bars)],
         study_window=study(),
+        progress_callback=lambda processed, total, as_of: progress.append(
+            (processed, total, as_of)
+        ),
     )
 
+    assert progress[-1] == (len(bars), len(bars), bars[-1].close_time)
     assert result.summary.bars == 7
     assert result.summary.liquidity_raids == 1
     assert result.summary.same_bar_sweeps == 1

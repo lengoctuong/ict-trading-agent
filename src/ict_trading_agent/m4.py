@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import Enum
 from hashlib import sha256
@@ -570,12 +570,23 @@ class _AuditCollector:
     def __init__(self, policy: M3Policy) -> None:
         self.policy = policy
         self.events: dict[str, M4AuditEvent] = {}
+        self._sequence: list[str] = []
 
     def add(self, event: M4AuditEvent) -> None:
         existing = self.events.get(event.event_id)
         if existing is not None and existing != event:
             raise ValueError(f"conflicting audit event: {event.event_id}")
-        self.events.setdefault(event.event_id, event)
+        if existing is None:
+            self.events[event.event_id] = event
+            self._sequence.append(event.event_id)
+
+    def checkpoint(self) -> int:
+        return len(self._sequence)
+
+    def since(self, checkpoint: int) -> tuple[M4AuditEvent, ...]:
+        return tuple(
+            self.events[event_id] for event_id in self._sequence[checkpoint:]
+        )
 
     def add_bar(self, record: ExnessBarRecord) -> None:
         bar = record.bar
@@ -1086,6 +1097,7 @@ class M4ReplayEngine:
         inputs: Sequence[ExnessDataset | ExnessBarRecord | OHLCBar],
         *,
         study_window: M4StudyWindow,
+        progress_callback: Callable[[int, int, datetime], None] | None = None,
     ) -> M4ReplayResult:
         if self._has_run:
             raise ValueError("M4ReplayEngine instances are single-run")
@@ -1155,9 +1167,11 @@ class M4ReplayEngine:
             self.policy.post_terminal_research_bars
         )
         minimum_bars = max(2, self.m2.candle_features.config.baseline_period) + 1
+        processed_records = 0
+        total_records = len(records)
         for as_of, grouped in groupby(records, key=lambda item: item.bar.close_time):
             current = list(grouped)
-            before = set(collector.events)
+            checkpoint = collector.checkpoint()
             for record in current:
                 self.feed.append(record.bar, observed_at=as_of)
                 collector.add_bar(record)
@@ -1182,9 +1196,8 @@ class M4ReplayEngine:
                 processed.append(timeframe)
             event_ids = [
                 event.event_id
-                for event in collector.ordered()
-                if event.event_id not in before
-                and (event.observed_at or event.available_at) == as_of
+                for event in collector.since(checkpoint)
+                if (event.observed_at or event.available_at) == as_of
             ]
             steps.append(
                 M4ReplayStep(
@@ -1194,6 +1207,9 @@ class M4ReplayEngine:
                     event_ids=event_ids,
                 )
             )
+            processed_records += len(current)
+            if progress_callback is not None:
+                progress_callback(processed_records, total_records, as_of)
         raw_events = collector.ordered()
         setup_origins = {
             item.setup_candidate_id: item.available_at

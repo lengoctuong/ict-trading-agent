@@ -162,6 +162,13 @@ class M2PrimitivePipeline:
         visible_at_open = self.fact_store.visible(
             as_of=bar.open_time,
             symbol=bar.symbol,
+            fact_types={
+                FactType.SWING_POINT,
+                FactType.SWING_PROMOTION,
+                FactType.SESSION_LEVEL,
+                FactType.PREVIOUS_DAY_LEVEL,
+                FactType.STRUCTURE_STATE,
+            },
         )
         facts.extend(self.swing_hierarchy.detect([*visible_at_open, *facts]))
         reference_facts = [
@@ -174,11 +181,16 @@ class M2PrimitivePipeline:
                 FactType.PREVIOUS_DAY_LEVEL,
             }
         ]
+        liquidity_lifecycle_at_close = self.fact_store.visible(
+            as_of=bar.close_time,
+            symbol=bar.symbol,
+            fact_types={FactType.LEVEL_BREACH, FactType.REFERENCE_STATE},
+        )
         for reference_fact in reference_facts:
             reference = ReferenceLevel.from_fact(reference_fact)
             liquidity_eligible = self.reference_lifecycle.is_eligible(
                 reference.reference_fact_id,
-                self.fact_store.visible(as_of=bar.close_time, symbol=bar.symbol),
+                liquidity_lifecycle_at_close,
                 as_of=bar.close_time,
             )
             if liquidity_eligible:
@@ -253,10 +265,8 @@ class M2PrimitivePipeline:
             raise DuplicateRecordError("M2 batch contains duplicate fact IDs")
         if len(candidate_ids) != len(set(candidate_ids)):
             raise DuplicateRecordError("M2 batch contains duplicate candidate IDs")
-        duplicate_facts = set(fact_ids) & set(self.fact_store.as_mapping())
-        duplicate_candidates = set(candidate_ids) & set(
-            self.candidate_store.as_mapping()
-        )
+        duplicate_facts = self.fact_store.existing_ids(fact_ids)
+        duplicate_candidates = self.candidate_store.existing_ids(candidate_ids)
         if duplicate_facts:
             raise DuplicateRecordError(
                 f"facts already stored: {sorted(duplicate_facts)}"

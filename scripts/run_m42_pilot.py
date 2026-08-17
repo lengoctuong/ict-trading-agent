@@ -172,7 +172,25 @@ def main() -> None:
         analysis_end=analysis_end,
     )
     print("running causal M4 replay", flush=True)
-    replay = engine.run(datasets, study_window=window)
+    next_progress = 2_500
+
+    def report_progress(processed: int, total: int, as_of: datetime) -> None:
+        nonlocal next_progress
+        if processed < next_progress and processed != total:
+            return
+        print(
+            f"replay progress: {processed}/{total} "
+            f"({processed / total:.1%}) as_of={as_of.isoformat()}",
+            flush=True,
+        )
+        while next_progress <= processed:
+            next_progress += 2_500
+
+    replay = engine.run(
+        datasets,
+        study_window=window,
+        progress_callback=report_progress,
+    )
     replay_paths = replay.export_jsonl(output / "replay")
     all_bars = [record.bar for dataset in datasets for record in dataset.records]
     bundle = M42ResearchAnalyzer(

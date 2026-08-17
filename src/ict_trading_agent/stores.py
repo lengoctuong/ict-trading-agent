@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
 
 from pydantic import AwareDatetime
@@ -24,11 +25,17 @@ class FactStore:
 
     def __init__(self) -> None:
         self._records: dict[str, ObservableFact] = {}
+        self._by_symbol: dict[str, list[str]] = defaultdict(list)
+        self._by_timeframe: dict[Timeframe | None, list[str]] = defaultdict(list)
+        self._by_fact_type: dict[FactType, list[str]] = defaultdict(list)
 
     def append(self, fact: ObservableFact) -> None:
         if fact.fact_id in self._records:
             raise DuplicateRecordError(f"duplicate fact_id: {fact.fact_id}")
         self._records[fact.fact_id] = fact.model_copy(deep=True)
+        self._by_symbol[fact.symbol].append(fact.fact_id)
+        self._by_timeframe[fact.timeframe].append(fact.fact_id)
+        self._by_fact_type[fact.fact_type].append(fact.fact_id)
 
     def extend(self, facts: Iterable[ObservableFact]) -> None:
         for fact in facts:
@@ -37,6 +44,16 @@ class FactStore:
     def get(self, fact_id: str) -> ObservableFact:
         return self._records[fact_id].model_copy(deep=True)
 
+    def get_optional(self, fact_id: str) -> ObservableFact | None:
+        fact = self._records.get(fact_id)
+        return fact.model_copy(deep=True) if fact is not None else None
+
+    def contains(self, fact_id: str) -> bool:
+        return fact_id in self._records
+
+    def existing_ids(self, fact_ids: Iterable[str]) -> set[str]:
+        return {fact_id for fact_id in fact_ids if fact_id in self._records}
+
     def visible(
         self,
         *,
@@ -44,14 +61,36 @@ class FactStore:
         symbol: str | None = None,
         timeframe: Timeframe | None = None,
         fact_type: FactType | None = None,
+        fact_types: Iterable[FactType] | None = None,
     ) -> tuple[ObservableFact, ...]:
+        requested_types = set(fact_types or ())
+        if fact_type is not None:
+            requested_types.add(fact_type)
+        indexed_groups: list[list[str]] = []
+        if symbol is not None:
+            indexed_groups.append(self._by_symbol.get(symbol, []))
+        if timeframe is not None:
+            indexed_groups.append(self._by_timeframe.get(timeframe, []))
+        if requested_types:
+            indexed_groups.append(
+                [
+                    fact_id
+                    for requested_type in requested_types
+                    for fact_id in self._by_fact_type.get(requested_type, [])
+                ]
+            )
+        candidate_ids = (
+            min(indexed_groups, key=len) if indexed_groups else self._records.keys()
+        )
         records = (
-            fact
-            for fact in self._records.values()
-            if fact.available_at <= as_of
-            and (symbol is None or fact.symbol == symbol)
-            and (timeframe is None or fact.timeframe == timeframe)
-            and (fact_type is None or fact.fact_type == fact_type)
+            self._records[fact_id]
+            for fact_id in candidate_ids
+            if (
+                (fact := self._records[fact_id]).available_at <= as_of
+                and (symbol is None or fact.symbol == symbol)
+                and (timeframe is None or fact.timeframe == timeframe)
+                and (not requested_types or fact.fact_type in requested_types)
+            )
         )
         return tuple(
             fact.model_copy(deep=True)
@@ -69,6 +108,9 @@ class FactStore:
 class CandidateStore:
     def __init__(self) -> None:
         self._records: dict[str, ConceptCandidate] = {}
+        self._by_symbol: dict[str, list[str]] = defaultdict(list)
+        self._by_timeframe: dict[Timeframe, list[str]] = defaultdict(list)
+        self._by_candidate_type: dict[CandidateType, list[str]] = defaultdict(list)
 
     def append(self, candidate: ConceptCandidate) -> None:
         if candidate.candidate_id in self._records:
@@ -76,10 +118,32 @@ class CandidateStore:
                 f"duplicate candidate_id: {candidate.candidate_id}"
             )
         self._records[candidate.candidate_id] = candidate.model_copy(deep=True)
+        self._by_symbol[candidate.symbol].append(candidate.candidate_id)
+        self._by_timeframe[candidate.timeframe].append(candidate.candidate_id)
+        self._by_candidate_type[candidate.candidate_type].append(
+            candidate.candidate_id
+        )
 
     def extend(self, candidates: Iterable[ConceptCandidate]) -> None:
         for candidate in candidates:
             self.append(candidate)
+
+    def get(self, candidate_id: str) -> ConceptCandidate:
+        return self._records[candidate_id].model_copy(deep=True)
+
+    def get_optional(self, candidate_id: str) -> ConceptCandidate | None:
+        candidate = self._records.get(candidate_id)
+        return candidate.model_copy(deep=True) if candidate is not None else None
+
+    def contains(self, candidate_id: str) -> bool:
+        return candidate_id in self._records
+
+    def existing_ids(self, candidate_ids: Iterable[str]) -> set[str]:
+        return {
+            candidate_id
+            for candidate_id in candidate_ids
+            if candidate_id in self._records
+        }
 
     def visible(
         self,
@@ -89,13 +153,28 @@ class CandidateStore:
         timeframe: Timeframe | None = None,
         candidate_type: CandidateType | None = None,
     ) -> tuple[ConceptCandidate, ...]:
+        indexed_groups: list[list[str]] = []
+        if symbol is not None:
+            indexed_groups.append(self._by_symbol.get(symbol, []))
+        if timeframe is not None:
+            indexed_groups.append(self._by_timeframe.get(timeframe, []))
+        if candidate_type is not None:
+            indexed_groups.append(self._by_candidate_type.get(candidate_type, []))
+        candidate_ids = (
+            min(indexed_groups, key=len) if indexed_groups else self._records.keys()
+        )
         records = (
-            candidate
-            for candidate in self._records.values()
-            if candidate.available_at <= as_of
-            and (symbol is None or candidate.symbol == symbol)
-            and (timeframe is None or candidate.timeframe == timeframe)
-            and (candidate_type is None or candidate.candidate_type == candidate_type)
+            self._records[candidate_id]
+            for candidate_id in candidate_ids
+            if (
+                (candidate := self._records[candidate_id]).available_at <= as_of
+                and (symbol is None or candidate.symbol == symbol)
+                and (timeframe is None or candidate.timeframe == timeframe)
+                and (
+                    candidate_type is None
+                    or candidate.candidate_type == candidate_type
+                )
+            )
         )
         return tuple(
             candidate.model_copy(deep=True)

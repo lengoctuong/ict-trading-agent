@@ -87,7 +87,7 @@ class M3Policy(SchemaModel):
     )
 
     @model_validator(mode="after")
-    def validate_windows(self) -> "M3Policy":
+    def validate_windows(self) -> M3Policy:
         if set(self.shift_window_bars) != set(self.fvg_expiry_bars):
             raise ValueError("shift and FVG-expiry policies must cover the same TFs")
         if any(value < 1 for value in self.shift_window_bars.values()):
@@ -117,7 +117,7 @@ class ReadyForLLMPayload(SchemaModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_payload(self) -> "ReadyForLLMPayload":
+    def validate_payload(self) -> ReadyForLLMPayload:
         if self.setup.status != SetupStatus.READY_FOR_LLM:
             raise ValueError("LLM payload requires a READY_FOR_LLM setup")
         if self.setup.available_at > self.as_of:
@@ -234,13 +234,15 @@ class M3SetupPipeline:
         as_of: AwareDatetime,
     ) -> ReadyForLLMPayload:
         setup = self.setup_store.current(setup_candidate_id, as_of=as_of)
-        fact_map = self.fact_store.as_mapping()
-        candidate_map = self.candidate_store.as_mapping()
-        facts = [fact_map[item] for item in setup.evidence_fact_ids if item in fact_map]
+        facts = [
+            fact
+            for item in setup.evidence_fact_ids
+            if (fact := self.fact_store.get_optional(item)) is not None
+        ]
         candidates = [
-            candidate_map[item]
+            candidate
             for item in setup.evidence_candidate_ids
-            if item in candidate_map
+            if (candidate := self.candidate_store.get_optional(item)) is not None
         ]
         targets = [
             target.model_copy(deep=True)
@@ -302,7 +304,7 @@ class M3SetupPipeline:
         ]
         for raid in current_raids:
             observation, episode, update, created, merged = self._record_raid(raid)
-            if observation.fact_id not in self.fact_store.as_mapping():
+            if not self.fact_store.contains(observation.fact_id):
                 self._append_facts([observation])
                 facts.append(observation)
             if episode is not None:
@@ -338,7 +340,7 @@ class M3SetupPipeline:
             raid_observation, _, update, created, promoted_transitions = (
                 self._record_raid(promoted)
             )
-            if raid_observation.fact_id not in self.fact_store.as_mapping():
+            if not self.fact_store.contains(raid_observation.fact_id):
                 self._append_facts([raid_observation])
                 facts.append(raid_observation)
             if update is not None:
@@ -478,8 +480,13 @@ class M3SetupPipeline:
             as_of=bar.open_time,
             symbol=bar.symbol,
             timeframe=bar.timeframe,
+            fact_type=FactType.LEVEL_BREACH,
         )
-        all_visible = self.fact_store.visible(as_of=bar.open_time, symbol=bar.symbol)
+        all_visible = self.fact_store.visible(
+            as_of=bar.open_time,
+            symbol=bar.symbol,
+            fact_type=FactType.LEVEL_RECLAIM,
+        )
         reclaimed_breach_ids = {
             source_id
             for fact in all_visible
@@ -487,7 +494,6 @@ class M3SetupPipeline:
             for source_id in fact.source_fact_ids
             if source_id.startswith("fact-")
         }
-        fact_map = self.fact_store.as_mapping()
         bars = self.bar_feed.bars(bar.timeframe, as_of=bar.close_time)
         current_index = next(
             index for index, item in enumerate(bars) if item.open_time == bar.open_time
@@ -500,7 +506,7 @@ class M3SetupPipeline:
             if breach.fact_id in reclaimed_breach_ids:
                 continue
             reference_id = str(breach.metrics["reference_fact_id"])
-            reference_fact = fact_map.get(reference_id)
+            reference_fact = self.fact_store.get_optional(reference_id)
             if reference_fact is None:
                 continue
             breach_index = next(
@@ -558,6 +564,7 @@ class M3SetupPipeline:
             as_of=bar.close_time,
             symbol=bar.symbol,
             timeframe=bar.timeframe,
+            fact_types={FactType.LEVEL_BREACH, FactType.LEVEL_RECLAIM},
         )
         current_breaches = [
             fact
@@ -718,7 +725,7 @@ class M3SetupPipeline:
             raise ValueError("raid observation requires timeframe and geometry")
         if observation.geometry.extreme is None:
             raise ValueError("raid observation requires an extreme")
-        reference = self.fact_store.as_mapping()[episode.reference_fact_id]
+        reference = self.fact_store.get(episode.reference_fact_id)
         reference_level = ReferenceLevel.from_fact(reference)
         side = reference_level.side
         reclaim_span = int(observation.metrics.get("reclaim_span_bars", 0))
@@ -762,9 +769,9 @@ class M3SetupPipeline:
                 "extreme": current_episode.extreme,
                 "same_bar_reclaim": reclaim_span == 0,
                 "reclaim_span_bars": reclaim_span,
-                "breach_available_at": self.fact_store.as_mapping()[
+                "breach_available_at": self.fact_store.get(
                     episode.first_take_fact_id
-                ].available_at.isoformat(),
+                ).available_at.isoformat(),
                 "reclaim_available_at": observation.available_at.isoformat(),
                 "promoted_from_raid_observation": True,
             },
@@ -970,10 +977,18 @@ class M3SetupPipeline:
     ) -> tuple[list[ObservableFact], list[RaidEpisodeUpdate], list[SetupTransition]]:
         if bar.timeframe not in self.policy.raid_observation_timeframes:
             return [], [], []
-        fact_map = self.fact_store.as_mapping()
         facts: list[ObservableFact] = []
         updates: list[RaidEpisodeUpdate] = []
         transitions: list[SetupTransition] = []
+        latest_observations: dict[tuple[str, Timeframe], ObservableFact] = {}
+        for previous in self.fact_store.visible(
+            as_of=bar.open_time,
+            symbol=bar.symbol,
+            fact_type=FactType.RAID_OBSERVATION,
+        ):
+            reference_id = previous.metrics.get("reference_fact_id")
+            if reference_id is not None and previous.timeframe is not None:
+                latest_observations[(str(reference_id), previous.timeframe)] = previous
         for episode in self.raid_store.visible(as_of=bar.close_time, symbol=bar.symbol):
             observation_id = stable_fact_id(
                 FactType.RAID_OBSERVATION.value,
@@ -981,9 +996,9 @@ class M3SetupPipeline:
                 bar.timeframe.value,
                 bar.open_time.isoformat(),
             )
-            if observation_id in fact_map:
+            if self.fact_store.contains(observation_id):
                 continue
-            reference_fact = fact_map.get(episode.reference_fact_id)
+            reference_fact = self.fact_store.get_optional(episode.reference_fact_id)
             if reference_fact is None or reference_fact.available_at > bar.open_time:
                 continue
             reference = ReferenceLevel.from_fact(reference_fact)
@@ -1014,20 +1029,11 @@ class M3SetupPipeline:
                 else RaidObservationState.BREACHED
             )
             source_ids = [episode.reference_fact_id]
-            previous_observations = [
-                fact
-                for fact in fact_map.values()
-                if fact.fact_type == FactType.RAID_OBSERVATION
-                and fact.timeframe == bar.timeframe
-                and fact.metrics.get("reference_fact_id") == episode.reference_fact_id
-            ]
-            if previous_observations:
-                source_ids.append(
-                    max(
-                        previous_observations,
-                        key=lambda item: (item.available_at, item.fact_id),
-                    ).fact_id
-                )
+            previous_observation = latest_observations.get(
+                (episode.reference_fact_id, bar.timeframe)
+            )
+            if previous_observation is not None:
+                source_ids.append(previous_observation.fact_id)
             observation = self._raid_observation(
                 reference_id=episode.reference_fact_id,
                 symbol=bar.symbol,
@@ -1114,9 +1120,9 @@ class M3SetupPipeline:
         setup: SetupCandidate,
         bar: OHLCBar,
     ) -> tuple[list[ConceptCandidate], SetupTransition | None, list[ObservableFact]]:
-        raid_candidate = self.candidate_store.as_mapping()[
+        raid_candidate = self.candidate_store.get(
             str(setup.metrics["raid_candidate_id"])
-        ]
+        )
         distance = self._bars_since(raid_candidate.available_at, bar)
         window = self.policy.shift_window_bars[bar.timeframe]
         structure_candidates = [
@@ -1255,12 +1261,13 @@ class M3SetupPipeline:
         setup: SetupCandidate,
         bar: OHLCBar,
     ) -> tuple[list[ConceptCandidate], SetupTransition | None, list[ObservableFact]]:
-        candidate_map = self.candidate_store.as_mapping()
         shifts = [
-            candidate_map[candidate_id]
+            candidate
             for candidate_id in setup.evidence_candidate_ids
-            if candidate_id in candidate_map
-            and candidate_map[candidate_id].candidate_type == CandidateType.SHIFT
+            if (
+                candidate := self.candidate_store.get_optional(candidate_id)
+            ) is not None
+            and candidate.candidate_type == CandidateType.SHIFT
         ]
         displacements = self.candidate_store.visible(
             as_of=bar.close_time,
@@ -1293,7 +1300,7 @@ class M3SetupPipeline:
                         fvg.fact_id,
                         displacement.candidate_id,
                     )
-                    if candidate_id in candidate_map or any(
+                    if self.candidate_store.contains(candidate_id) or any(
                         zone.candidate_id == candidate_id for zone in zones
                     ):
                         continue
@@ -1405,12 +1412,13 @@ class M3SetupPipeline:
         ]
         if not shifts:
             return [], None, []
-        candidate_map = self.candidate_store.as_mapping()
-        raid_candidate = candidate_map[str(setup.metrics["raid_candidate_id"])]
+        raid_candidate = self.candidate_store.get(
+            str(setup.metrics["raid_candidate_id"])
+        )
         episode = self.raid_store.current(
             str(setup.metrics["raid_episode_id"]), as_of=shift_bar.close_time
         )
-        first_take = self.fact_store.as_mapping().get(episode.first_take_fact_id)
+        first_take = self.fact_store.get_optional(episode.first_take_fact_id)
         physical_start_occurred = (
             first_take.occurred_at
             if first_take is not None
@@ -1485,7 +1493,7 @@ class M3SetupPipeline:
                         fvg.fact_id,
                         displacement.candidate_id,
                     )
-                    if candidate_id in candidate_map or any(
+                    if self.candidate_store.contains(candidate_id) or any(
                         item.candidate_id == candidate_id for item in zones
                     ):
                         continue
@@ -1641,11 +1649,12 @@ class M3SetupPipeline:
         setup: SetupCandidate,
         bar: OHLCBar,
     ) -> tuple[list[ObservableFact], SetupTransition | None]:
-        candidate_map = self.candidate_store.as_mapping()
         zones = [
-            candidate_map[candidate_id]
+            candidate
             for candidate_id in setup.entry_zone_candidate_ids
-            if candidate_id in candidate_map
+            if (
+                candidate := self.candidate_store.get_optional(candidate_id)
+            ) is not None
         ]
         stored_reactions = [
             fact
@@ -2044,10 +2053,9 @@ class M3SetupPipeline:
                         | {"fvg_fact_ids": [item.fact_id for item in fvgs]},
                     )
                 )
-            candidate_map = self.candidate_store.as_mapping()
             touched_zone_ids = []
             for zone_id in setup.entry_zone_candidate_ids:
-                zone = candidate_map.get(zone_id)
+                zone = self.candidate_store.get_optional(zone_id)
                 if zone is None or bar.open_time < zone.available_at:
                     continue
                 low = float(zone.raw_features["low"])
@@ -2171,15 +2179,13 @@ class M3SetupPipeline:
         return current_index - available_index
 
     def _append_facts(self, facts: Sequence[ObservableFact]) -> None:
-        existing = self.fact_store.as_mapping()
         ids = [fact.fact_id for fact in facts]
-        if len(ids) != len(set(ids)) or any(item in existing for item in ids):
+        if len(ids) != len(set(ids)) or self.fact_store.existing_ids(ids):
             raise DuplicateRecordError("M3 attempted to append duplicate facts")
         self.fact_store.extend(facts)
 
     def _append_candidates(self, candidates: Sequence[ConceptCandidate]) -> None:
-        existing = self.candidate_store.as_mapping()
         ids = [candidate.candidate_id for candidate in candidates]
-        if len(ids) != len(set(ids)) or any(item in existing for item in ids):
+        if len(ids) != len(set(ids)) or self.candidate_store.existing_ids(ids):
             raise DuplicateRecordError("M3 attempted to append duplicate candidates")
         self.candidate_store.extend(candidates)
