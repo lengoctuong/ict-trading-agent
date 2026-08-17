@@ -19,7 +19,7 @@ from .candidates import ConceptCandidate, SetupCandidate, TargetCandidate
 from .detectors import CandleFeatureConfig, DisplacementThresholds
 from .enums import CandidateType, Direction, FactType, SetupStatus, Timeframe
 from .facts import ObservableFact
-from .lifecycle import SetupTransition
+from .lifecycle import SetupEvidenceLink, SetupTransition
 from .m3 import M3DetectionBatch, M3Policy, M3SetupPipeline, ReadyForLLMPayload
 from .m4_support import (
     CausalReferenceBuilder,
@@ -60,6 +60,7 @@ class M4EventKind(str, Enum):
     RAID_EPISODE = "raid_episode"
     RAID_UPDATE = "raid_update"
     SETUP = "setup"
+    SETUP_EVIDENCE = "setup_evidence"
     TRANSITION = "transition"
     READY_PAYLOAD = "ready_payload"
 
@@ -124,6 +125,7 @@ class ExnessDataset(SchemaModel):
     records: list[ExnessBarRecord]
     quality: DataQualityReport
     content_sha256: NonEmptyStr
+    source_rows: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_dataset(self) -> ExnessDataset:
@@ -131,9 +133,38 @@ class ExnessDataset(SchemaModel):
             raise ValueError("Exness dataset cannot be empty")
         if any(item.bar.symbol != self.symbol for item in self.records):
             raise ValueError("dataset records must use one symbol")
-        if self.quality.rows_accepted != len(self.records):
-            raise ValueError("quality accepted-row count must match dataset records")
+        expected_source_rows = self.source_rows or len(self.records)
+        if self.quality.rows_accepted != expected_source_rows:
+            raise ValueError(
+                "quality accepted-row count must match the source dataset"
+            )
+        if self.source_rows is not None and len(self.records) > self.source_rows:
+            raise ValueError("a replay slice cannot exceed its source row count")
         return self
+
+    def window(
+        self,
+        *,
+        start_at: AwareDatetime,
+        end_at: AwareDatetime | None,
+    ) -> ExnessDataset:
+        """Retain only replay rows while preserving full-source provenance."""
+
+        selected = [
+            record
+            for record in self.records
+            if record.bar.open_time >= start_at
+            and (end_at is None or record.bar.close_time <= end_at)
+        ]
+        if not selected:
+            raise ValueError("dataset window excludes every record")
+        return ExnessDataset(
+            symbol=self.symbol,
+            records=selected,
+            quality=self.quality,
+            content_sha256=self.content_sha256,
+            source_rows=self.source_rows or len(self.records),
+        )
 
 
 def _normalized_header(value: str) -> str:
@@ -540,10 +571,10 @@ class M4ReplayResult(SchemaModel):
             ("near_misses", self.near_misses),
             ("steps", self.steps),
         ):
-            paths[key].write_text(
-                "".join(item.model_dump_json() + "\n" for item in items),
-                encoding="utf-8",
-            )
+            with paths[key].open("w", encoding="utf-8", newline="\n") as stream:
+                for item in items:
+                    stream.write(item.model_dump_json())
+                    stream.write("\n")
         paths["summary"].write_text(
             self.summary.model_dump_json(indent=2), encoding="utf-8"
         )
@@ -567,12 +598,45 @@ def _audit_id(kind: M4EventKind, record_id: str) -> str:
 
 
 class _AuditCollector:
-    def __init__(self, policy: M3Policy) -> None:
+    def __init__(
+        self,
+        policy: M3Policy,
+        *,
+        study_window: M4StudyWindow | None = None,
+        retain_research_events: bool = True,
+    ) -> None:
         self.policy = policy
+        self.study_window = study_window
+        self.retain_research_events = retain_research_events
         self.events: dict[str, M4AuditEvent] = {}
         self._sequence: list[str] = []
+        self._setup_origin_times: dict[str, datetime] = {}
+        self._streamed_misses: list[M4NearMiss] = []
+        self.analysis_research_count = 0
+        self.analysis_research_reasons: Counter[str] = Counter()
 
     def add(self, event: M4AuditEvent) -> None:
+        if event.kind == M4EventKind.SETUP and event.setup_candidate_id is not None:
+            self._setup_origin_times[event.setup_candidate_id] = event.available_at
+        if (
+            not self.retain_research_events
+            and event.kind == M4EventKind.FACT
+            and event.category == FactType.RESEARCH_OBSERVATION.value
+        ):
+            if self.study_window is not None:
+                phase = self.study_window.phase_at(event.available_at)
+                origin = self._setup_origin_times.get(event.setup_candidate_id or "")
+                included = phase == "analysis" and (
+                    origin is None or self.study_window.phase_at(origin) == "analysis"
+                )
+                event = event.model_copy(
+                    update={"study_phase": phase, "included_in_analysis": included}
+                )
+            self._streamed_misses.extend(self._near_misses_for_event(event))
+            if event.included_in_analysis:
+                self.analysis_research_count += 1
+                self.analysis_research_reasons.update(event.reason_codes)
+            return
         existing = self.events.get(event.event_id)
         if existing is not None and existing != event:
             raise ValueError(f"conflicting audit event: {event.event_id}")
@@ -624,7 +688,20 @@ class _AuditCollector:
                 episode.symbol,
                 episode.created_at,
                 episode.available_at,
-                episode.model_dump(mode="json"),
+                {
+                    "reference_fact_id": episode.reference_fact_id,
+                    "first_take_fact_id": episode.first_take_fact_id,
+                    "first_raid_candidate_id": episode.first_raid_candidate_id,
+                    "observation_states": {
+                        key.value: value.value
+                        for key, value in episode.observation_states.items()
+                    },
+                    "observation_extremes": {
+                        key.value: value
+                        for key, value in episode.observation_extremes.items()
+                    },
+                    "extreme": episode.extreme,
+                },
                 direction=episode.direction,
                 raid_episode_id=episode.raid_episode_id,
             )
@@ -636,16 +713,48 @@ class _AuditCollector:
                 batch.symbol,
                 update.occurred_at,
                 update.available_at,
-                update.model_dump(mode="json"),
+                {
+                    "observation_fact_id": update.observation_fact_id,
+                    "raid_candidate_id": update.raid_candidate_id,
+                    "observation_state": update.observation_state.value,
+                    "breached_at": update.breached_at,
+                    "extreme": update.extreme,
+                },
                 timeframe=update.observation_timeframe,
                 raid_episode_id=update.raid_episode_id,
             )
         for setup in batch.setups_created:
             self._add_setup(setup)
+        for link in batch.evidence_links:
+            self._add_evidence_link(batch.symbol, batch.timeframe, link)
         for transition in batch.transitions:
             self._add_transition(batch.symbol, batch.timeframe, transition)
         for payload in batch.ready_for_llm:
             self._add_ready(payload)
+
+    def _add_evidence_link(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        link: SetupEvidenceLink,
+    ) -> None:
+        self._add_model(
+            M4EventKind.SETUP_EVIDENCE,
+            "setup_evidence_link",
+            link.evidence_link_id,
+            symbol,
+            link.occurred_at,
+            link.available_at,
+            {
+                "evidence_candidate_ids": link.evidence_candidate_ids,
+                "evidence_fact_ids": link.evidence_fact_ids,
+                "entry_zone_candidate_ids": link.entry_zone_candidate_ids,
+                "reason_codes": link.reason_codes,
+                "metrics": link.metrics,
+            },
+            timeframe=timeframe,
+            setup_candidate_id=link.setup_candidate_id,
+        )
 
     def _add_fact(self, fact: ObservableFact) -> None:
         observed_at = fact.metrics.get("observed_at")
@@ -656,7 +765,17 @@ class _AuditCollector:
             fact.symbol,
             fact.occurred_at,
             fact.available_at,
-            fact.model_dump(mode="json"),
+            {
+                "geometry": (
+                    fact.geometry.model_dump(mode="json")
+                    if fact.geometry is not None
+                    else None
+                ),
+                "source_fact_ids": fact.source_fact_ids,
+                "metrics": fact.metrics,
+                "detector_name": fact.detector_name,
+                "detector_version": fact.detector_version,
+            },
             timeframe=fact.timeframe,
             direction=fact.direction,
             setup_candidate_id=fact.metrics.get("setup_candidate_id"),
@@ -681,7 +800,12 @@ class _AuditCollector:
             candidate.symbol,
             candidate.occurred_at,
             candidate.available_at,
-            candidate.model_dump(mode="json"),
+            {
+                "evidence_fact_ids": candidate.evidence_fact_ids,
+                "related_candidate_ids": candidate.related_candidate_ids,
+                "raw_features": candidate.raw_features,
+                "machine_labels": candidate.machine_labels,
+            },
             timeframe=candidate.timeframe,
             direction=candidate.direction,
             setup_candidate_id=candidate.raw_features.get("setup_candidate_id"),
@@ -695,7 +819,18 @@ class _AuditCollector:
             setup.symbol,
             setup.created_at,
             setup.available_at,
-            setup.model_dump(mode="json"),
+            {
+                "setup_type": setup.setup_type,
+                "setup_version": setup.setup_version,
+                "entry_timeframe": setup.entry_timeframe.value,
+                "evidence_candidate_ids": setup.evidence_candidate_ids,
+                "evidence_fact_ids": setup.evidence_fact_ids,
+                "entry_zone_candidate_ids": setup.entry_zone_candidate_ids,
+                "target_candidate_ids": setup.target_candidate_ids,
+                "hard_invalidation_price": setup.hard_invalidation_price,
+                "expires_at": setup.expires_at,
+                "metrics": setup.metrics,
+            },
             timeframe=setup.setup_timeframe,
             direction=setup.direction,
             setup_candidate_id=setup.setup_candidate_id,
@@ -715,7 +850,21 @@ class _AuditCollector:
             symbol,
             transition.occurred_at,
             transition.available_at,
-            transition.model_dump(mode="json"),
+            {
+                "from_status": (
+                    transition.from_status.value
+                    if transition.from_status is not None
+                    else None
+                ),
+                "to_status": transition.to_status.value,
+                "evidence_candidate_ids": transition.evidence_candidate_ids,
+                "evidence_fact_ids": transition.evidence_fact_ids,
+                "entry_zone_candidate_ids": transition.entry_zone_candidate_ids,
+                "hard_invalidation_price": transition.hard_invalidation_price,
+                "reason_codes": transition.reason_codes,
+                "expires_at": transition.expires_at,
+                "metrics": transition.metrics,
+            },
             timeframe=timeframe,
             setup_candidate_id=transition.setup_candidate_id,
             reason_codes=transition.reason_codes,
@@ -729,7 +878,17 @@ class _AuditCollector:
             payload.setup.symbol,
             payload.setup.created_at,
             payload.as_of,
-            payload.model_dump(mode="json"),
+            {
+                "setup": {
+                    "setup_candidate_id": payload.setup.setup_candidate_id,
+                    "status": payload.setup.status.value,
+                    "evidence_candidate_ids": payload.setup.evidence_candidate_ids,
+                    "evidence_fact_ids": payload.setup.evidence_fact_ids,
+                    "entry_zone_candidate_ids": payload.setup.entry_zone_candidate_ids,
+                },
+                "targets": [item.model_dump(mode="json") for item in payload.targets],
+                "context": payload.context,
+            },
             timeframe=payload.setup.setup_timeframe,
             direction=payload.setup.direction,
             setup_candidate_id=payload.setup.setup_candidate_id,
@@ -778,85 +937,88 @@ class _AuditCollector:
         )
 
     def near_misses(self) -> list[M4NearMiss]:
-        misses: list[M4NearMiss] = []
+        misses: list[M4NearMiss] = list(self._streamed_misses)
         for event in self.ordered():
-            reasons = list(event.reason_codes)
-            if event.kind == M4EventKind.TRANSITION and event.category == "expired":
-                reasons = reasons or ["EXPIRED_SETUP"]
-            for reason in reasons:
-                is_reclaim = reason == "RECLAIM_OUTSIDE_WINDOW"
-                is_research = event.category == FactType.RESEARCH_OBSERVATION.value
-                is_expiry = (
-                    event.kind == M4EventKind.TRANSITION and event.category == "expired"
+            misses.extend(self._near_misses_for_event(event))
+        return misses
+
+    def _near_misses_for_event(self, event: M4AuditEvent) -> list[M4NearMiss]:
+        misses: list[M4NearMiss] = []
+        reasons = list(event.reason_codes)
+        if event.kind == M4EventKind.TRANSITION and event.category == "expired":
+            reasons = reasons or ["EXPIRED_SETUP"]
+        for reason in reasons:
+            is_reclaim = reason == "RECLAIM_OUTSIDE_WINDOW"
+            is_research = event.category == FactType.RESEARCH_OBSERVATION.value
+            is_expiry = (
+                event.kind == M4EventKind.TRANSITION and event.category == "expired"
+            )
+            if not (is_reclaim or is_research or is_expiry):
+                continue
+            metrics = event.payload.get("metrics", {})
+            distance: int | None = None
+            threshold: int | None = None
+            if is_reclaim:
+                distance = int(metrics.get("reclaim_span_bars", 0))
+                threshold = self.policy.reclaim_window_bars
+            elif "SHIFT" in reason and metrics.get("bars_after_raid") is not None:
+                distance = int(metrics["bars_after_raid"])
+                if event.timeframe in self.policy.shift_window_bars:
+                    threshold = self.policy.shift_window_bars[event.timeframe]
+            elif "REACTION_OUTSIDE" in reason:
+                distance = int(metrics.get("reaction_lag_bars", 0))
+                threshold = self.policy.reaction_confirmation_bars
+            elif reason in {"NO_CAUSALLY_LINKED_FVG", "FVG_LINK_WINDOW_EXPIRED"}:
+                distance = int(metrics.get("bars_after_shift", 0))
+                threshold = self.policy.repricing_max_lag_bars + 1
+            elif reason == "LATE_FVG_AFTER_TERMINAL":
+                threshold = self.policy.repricing_max_lag_bars + 1
+                distance = threshold + int(metrics.get("bars_after_terminal", 0))
+            elif (
+                reason == "LATE_RETRACE_AFTER_TERMINAL"
+                and metrics.get("terminal_status") == SetupStatus.EXPIRED.value
+                and event.timeframe in self.policy.fvg_expiry_bars
+            ):
+                threshold = self.policy.fvg_expiry_bars[event.timeframe]
+                distance = threshold + int(metrics.get("bars_after_terminal", 0))
+            elif (
+                reason == "FVG_RETRACE_WINDOW_EXPIRED"
+                and event.timeframe in self.policy.fvg_expiry_bars
+            ):
+                threshold = self.policy.fvg_expiry_bars[event.timeframe]
+                distance = threshold
+            elif metrics.get("bars_after_terminal") is not None:
+                distance = int(metrics["bars_after_terminal"])
+            excess = (
+                max(0, distance - threshold)
+                if distance is not None and threshold is not None
+                else None
+            )
+            miss_id = "near-miss-" + sha256(
+                f"{event.event_id}|{reason}".encode()
+            ).hexdigest()[:24]
+            misses.append(
+                M4NearMiss(
+                    near_miss_id=miss_id,
+                    source_event_id=event.event_id,
+                    symbol=event.symbol,
+                    timeframe=event.timeframe,
+                    occurred_at=event.occurred_at,
+                    available_at=event.available_at,
+                    reason_code=reason,
+                    setup_candidate_id=event.setup_candidate_id,
+                    distance_bars=distance,
+                    threshold_bars=threshold,
+                    excess_bars=excess,
+                    study_phase=event.study_phase,
+                    included_in_analysis=event.included_in_analysis,
+                    payload={
+                        "category": event.category,
+                        "metrics": dict(metrics),
+                        "reason_codes": list(event.reason_codes),
+                    },
                 )
-                if not (is_reclaim or is_research or is_expiry):
-                    continue
-                metrics = event.payload.get("metrics", {})
-                distance: int | None = None
-                threshold: int | None = None
-                if is_reclaim:
-                    distance = int(metrics.get("reclaim_span_bars", 0))
-                    threshold = self.policy.reclaim_window_bars
-                elif "SHIFT" in reason and metrics.get("bars_after_raid") is not None:
-                    distance = int(metrics["bars_after_raid"])
-                    if event.timeframe in self.policy.shift_window_bars:
-                        threshold = self.policy.shift_window_bars[event.timeframe]
-                elif "REACTION_OUTSIDE" in reason:
-                    distance = int(metrics.get("reaction_lag_bars", 0))
-                    threshold = self.policy.reaction_confirmation_bars
-                elif reason in {
-                    "NO_CAUSALLY_LINKED_FVG",
-                    "FVG_LINK_WINDOW_EXPIRED",
-                }:
-                    distance = int(metrics.get("bars_after_shift", 0))
-                    threshold = self.policy.repricing_max_lag_bars + 1
-                elif reason == "LATE_FVG_AFTER_TERMINAL":
-                    threshold = self.policy.repricing_max_lag_bars + 1
-                    excess_after_terminal = int(metrics.get("bars_after_terminal", 0))
-                    distance = threshold + excess_after_terminal
-                elif (
-                    reason == "LATE_RETRACE_AFTER_TERMINAL"
-                    and metrics.get("terminal_status") == SetupStatus.EXPIRED.value
-                    and event.timeframe in self.policy.fvg_expiry_bars
-                ):
-                    threshold = self.policy.fvg_expiry_bars[event.timeframe]
-                    excess_after_terminal = int(metrics.get("bars_after_terminal", 0))
-                    distance = threshold + excess_after_terminal
-                elif (
-                    reason == "FVG_RETRACE_WINDOW_EXPIRED"
-                    and event.timeframe in self.policy.fvg_expiry_bars
-                ):
-                    threshold = self.policy.fvg_expiry_bars[event.timeframe]
-                    distance = threshold
-                elif metrics.get("bars_after_terminal") is not None:
-                    distance = int(metrics["bars_after_terminal"])
-                excess = (
-                    max(0, distance - threshold)
-                    if distance is not None and threshold is not None
-                    else None
-                )
-                miss_id = (
-                    "near-miss-"
-                    + sha256(f"{event.event_id}|{reason}".encode()).hexdigest()[:24]
-                )
-                misses.append(
-                    M4NearMiss(
-                        near_miss_id=miss_id,
-                        source_event_id=event.event_id,
-                        symbol=event.symbol,
-                        timeframe=event.timeframe,
-                        occurred_at=event.occurred_at,
-                        available_at=event.available_at,
-                        reason_code=reason,
-                        setup_candidate_id=event.setup_candidate_id,
-                        distance_bars=distance,
-                        threshold_bars=threshold,
-                        excess_bars=excess,
-                        study_phase=event.study_phase,
-                        included_in_analysis=event.included_in_analysis,
-                        payload=event.payload,
-                    )
-                )
+            )
         return misses
 
 
@@ -864,6 +1026,9 @@ def _summary(
     events: Sequence[M4AuditEvent],
     misses: Sequence[M4NearMiss],
     setups: Sequence[SetupCandidate],
+    *,
+    streamed_research_count: int = 0,
+    streamed_research_reasons: Mapping[str, int] | None = None,
 ) -> M4Summary:
     bars = [item for item in events if item.kind == M4EventKind.BAR]
     facts = [item for item in events if item.kind == M4EventKind.FACT]
@@ -877,6 +1042,9 @@ def _summary(
     shifts = [item for item in candidates if item.category == CandidateType.SHIFT.value]
     reactions = [item for item in facts if item.category == FactType.FVG_REACTION.value]
     research_reasons = Counter(reason for item in facts for reason in item.reason_codes)
+    research_reasons.update(streamed_research_reasons or {})
+    fact_counts = Counter(item.category for item in facts)
+    fact_counts[FactType.RESEARCH_OBSERVATION.value] += streamed_research_count
     setup_events = [item for item in events if item.kind == M4EventKind.SETUP]
     ready_payloads = [item for item in events if item.kind == M4EventKind.READY_PAYLOAD]
     session_labels: list[str] = []
@@ -974,7 +1142,7 @@ def _summary(
         bars_by_timeframe=dict(
             Counter(item.timeframe.value for item in bars if item.timeframe)
         ),
-        facts_by_type=dict(Counter(item.category for item in facts)),
+        facts_by_type=dict(fact_counts),
         candidates_by_type=dict(Counter(item.category for item in candidates)),
         setups_by_status=dict(Counter(item.status.value for item in setups)),
         near_misses_by_reason=dict(Counter(item.reason_code for item in misses)),
@@ -1016,7 +1184,7 @@ def _summary(
 class M4ReplayEngine:
     """Append bars at their close and run the production M2/M3 path once."""
 
-    version = "0.1.2"
+    version = "0.2.0"
     _timeframe_priority: ClassVar[dict[Timeframe, int]] = {
         Timeframe.M1: 0,
         Timeframe.M5: 1,
@@ -1043,6 +1211,7 @@ class M4ReplayEngine:
         reference_lifecycle_policy: ReferenceLifecyclePolicy | None = None,
         context_provider: TemporalContextProvider | None = None,
         reference_builder: CausalReferenceBuilder | None = None,
+        retain_research_facts: bool = True,
     ) -> None:
         if symbol_metadata.symbol != symbol:
             raise ValueError("symbol metadata must match the replay symbol")
@@ -1058,6 +1227,7 @@ class M4ReplayEngine:
         self.reference_lifecycle_policy = (
             reference_lifecycle_policy or ReferenceLifecyclePolicy()
         )
+        self.retain_research_facts = retain_research_facts
         self.target_candidates = tuple(
             item.model_copy(deep=True) for item in target_candidates
         )
@@ -1089,6 +1259,7 @@ class M4ReplayEngine:
             policy=self.policy,
             target_candidates=target_candidates,
             context=self.base_context,
+            retain_research_facts=retain_research_facts,
         )
         self._has_run = False
 
@@ -1098,6 +1269,7 @@ class M4ReplayEngine:
         *,
         study_window: M4StudyWindow,
         progress_callback: Callable[[int, int, datetime], None] | None = None,
+        retain_steps: bool = True,
     ) -> M4ReplayResult:
         if self._has_run:
             raise ValueError("M4ReplayEngine instances are single-run")
@@ -1157,7 +1329,11 @@ class M4ReplayEngine:
                 item.bar.open_time,
             )
         )
-        collector = _AuditCollector(self.policy)
+        collector = _AuditCollector(
+            self.policy,
+            study_window=study_window,
+            retain_research_events=self.retain_research_facts,
+        )
         completed_at = records[-1].bar.close_time
         for fact in self.initial_facts:
             if fact.available_at <= completed_at:
@@ -1171,7 +1347,7 @@ class M4ReplayEngine:
         total_records = len(records)
         for as_of, grouped in groupby(records, key=lambda item: item.bar.close_time):
             current = list(grouped)
-            checkpoint = collector.checkpoint()
+            checkpoint = collector.checkpoint() if retain_steps else 0
             for record in current:
                 self.feed.append(record.bar, observed_at=as_of)
                 collector.add_bar(record)
@@ -1194,19 +1370,20 @@ class M4ReplayEngine:
                     m3_batch = self.m3.process_latest(timeframe=timeframe, as_of=as_of)
                     collector.add_m3(m3_batch)
                 processed.append(timeframe)
-            event_ids = [
-                event.event_id
-                for event in collector.since(checkpoint)
-                if (event.observed_at or event.available_at) == as_of
-            ]
-            steps.append(
-                M4ReplayStep(
-                    as_of=as_of,
-                    study_phase=study_window.phase_at(as_of),
-                    processed_timeframes=processed,
-                    event_ids=event_ids,
+            if retain_steps:
+                event_ids = [
+                    event.event_id
+                    for event in collector.since(checkpoint)
+                    if (event.observed_at or event.available_at) == as_of
+                ]
+                steps.append(
+                    M4ReplayStep(
+                        as_of=as_of,
+                        study_phase=study_window.phase_at(as_of),
+                        processed_timeframes=processed,
+                        event_ids=event_ids,
+                    )
                 )
-            )
             processed_records += len(current)
             if progress_callback is not None:
                 progress_callback(processed_records, total_records, as_of)
@@ -1239,17 +1416,19 @@ class M4ReplayEngine:
                 )
             )
         event_map = {item.event_id: item for item in events}
-        misses = [
-            item.model_copy(
-                update={
-                    "study_phase": event_map[item.source_event_id].study_phase,
-                    "included_in_analysis": event_map[
-                        item.source_event_id
-                    ].included_in_analysis,
-                }
+        misses: list[M4NearMiss] = []
+        for item in collector.near_misses():
+            source = event_map.get(item.source_event_id)
+            misses.append(
+                item
+                if source is None
+                else item.model_copy(
+                    update={
+                        "study_phase": source.study_phase,
+                        "included_in_analysis": source.included_in_analysis,
+                    }
+                )
             )
-            for item in collector.near_misses()
-        ]
         final_setups = self.setups.visible(as_of=completed_at, symbol=self.symbol)
         eligible_setup_ids = {
             item.setup_candidate_id
@@ -1307,7 +1486,13 @@ class M4ReplayEngine:
             near_misses=misses,
             steps=steps,
             data_quality=quality,
-            summary=_summary(analysis_events, analysis_misses, final_setups),
+            summary=_summary(
+                analysis_events,
+                analysis_misses,
+                final_setups,
+                streamed_research_count=collector.analysis_research_count,
+                streamed_research_reasons=collector.analysis_research_reasons,
+            ),
         )
 
 
@@ -1318,7 +1503,7 @@ def _source_fingerprints(
         M4SourceFingerprint(
             source_name=item.quality.source_name,
             content_sha256=item.content_sha256,
-            rows=len(item.records),
+            rows=item.source_rows or len(item.records),
             timeframes=sorted(
                 {record.bar.timeframe for record in item.records},
                 key=lambda value: value.value,

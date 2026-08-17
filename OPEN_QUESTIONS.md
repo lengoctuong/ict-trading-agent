@@ -42,7 +42,24 @@ means that design is enforced by code and tests.
    level frozen at SHIFT, with zero distance buffer. Alternatives such as two
    closes or an ATR buffer remain replay experiments, not runtime ambiguity.
 
+8. **M4.2 chart review — OPEN, user review required.** The deterministic chart
+   queue is generated with status `PENDING_USER_REVIEW`. No machine-generated
+   ICT verdict is treated as approved chart evidence.
+
+9. **Full-range replay completion — OPEN, non-blocking after week gate.** The
+   required one-week M4-PERF gate passes at 18.38 seconds and 369.5 MB peak
+   working set. The complete cached warmup + analysis range was stopped after
+   three minutes during this patch cycle; it must be run as a separately
+   monitored long research job before freezing full-range M4.2 artifacts.
+
 ## Resolved and implemented
+
+- **M4 performance hardening — IMPLEMENTED for the blocking week gate.** Raid
+  observations emit only on breach/state/extreme changes; setup evidence is
+  separate from lifecycle transitions; swing hierarchy, reference lookup, and
+  setup scheduling are incremental/indexed; research payloads and JSONL output
+  are compact. Synthetic/random equivalence tests preserve raid, shift, FVG,
+  lifecycle, READY, cross-TF recall, IDs, availability, and swing ranks.
 
 - **M3 clock/data policy — IMPLEMENTED.** Exness source timestamps use UTC;
   D1/H4 and PDH/PDL follow completed source candles rather than a synthesized

@@ -73,8 +73,9 @@ IDLE -> RAID -> SHIFT -> ENTRY_ZONE -> READY_FOR_LLM
 
 ## M4 — Replay/backtest harness
 
-Status: M4.1 implemented; awaiting real Exness exports and review before M4.2
-parameter sensitivity, chart sampling, and outcome labels.
+Status: M4.1 implemented; M4-PERF week gate passed on cached real Exness data.
+M4.2 machine-generated parameter sensitivity and forward labels run, while
+chart verdicts remain pending user review.
 
 - Native Exness/MT5 CSV/TSV ingestion for XAUUSD with explicit UTC timestamps,
   source spread preservation, and configurable abnormal-spread threshold.
@@ -83,8 +84,8 @@ parameter sensitivity, chart sampling, and outcome labels.
 - Close-time event scheduler with lower-TF-first ordering at equal timestamps.
 - Exact point-in-time replay through the production M2 and M3 paths; bars are
   appended only when their close becomes observable.
-- Append-only bar/fact/candidate/raid/setup/transition/READY audit events with
-  raw payloads and causal timestamps.
+- Append-only bar/fact/candidate/raid/setup/evidence/transition/READY audit
+  events with compact payloads and causal timestamps.
 - Separate near-miss records for late reclaim/shift/FVG/reaction observations
   and expired setups, including distance, threshold, and excess when known.
 - JSONL event, near-miss, and replay-step exports plus summary and data-quality
@@ -92,8 +93,10 @@ parameter sensitivity, chart sampling, and outcome labels.
 - Basic detection counts for raids, reclaim type, shifts, FVG lifecycle,
   reactions, READY, invalidated/expired setups, TFs, and reason codes.
 
-M4.2 remains pending: real-data parameter sensitivity, annotated chart review,
-future MFE/MAE and DOL outcome labeling, and reviewed real-XAU regressions.
+M4.2 remains partially open: annotated chart review, the long-range full replay
+completion gate, DOL-specific outcome interpretation, and reviewed real-XAU
+regressions. Machine parameter distributions and future MFE/MAE labels are
+implemented without tuning the frozen M3 parameters.
 
 ## M5 — Semantic evaluator
 

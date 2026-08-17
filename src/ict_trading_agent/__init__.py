@@ -27,6 +27,7 @@ from .enums import *
 from .facts import ObservableFact, PriceGeometry
 from .lifecycle import (
     ALLOWED_SETUP_TRANSITIONS,
+    SetupEvidenceLink,
     SetupTransition,
     assert_setup_transition,
     can_transition_setup,
@@ -195,6 +196,7 @@ __all__ = [
     "SessionSchedule",
     "SessionWindow",
     "SetupCandidate",
+    "SetupEvidenceLink",
     "SetupRuleSpec",
     "SetupSemanticDecision",
     "SetupSpec",

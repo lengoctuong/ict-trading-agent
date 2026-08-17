@@ -108,13 +108,14 @@ and session classification never filters setups.
 
 The export contains:
 
-- `audit_events.jsonl`: closed bars and every emitted fact, candidate, raid
-  episode/update, setup, transition, and READY payload with the raw model JSON;
+- `audit_events.jsonl`: closed bars and retained fact, candidate, raid
+  episode/update, setup, evidence-link, transition, and READY envelopes with
+  compact evidence/metric payloads;
 - `near_misses.jsonl`: late reclaim/shift/FVG/reaction research observations
   and expired setups, including timing distance, threshold, and excess where a
   versioned threshold exists;
-- `replay_steps.jsonl`: exact close-time schedule and event IDs revealed at
-  each step;
+- `replay_steps.jsonl`: optional debug output with the exact close-time
+  schedule and event IDs revealed at each step;
 - `summary.json`: basic detection and terminal-status counts;
 - `data_quality.json`: source validation reports and all explained/unexplained
   gaps.
@@ -122,10 +123,42 @@ The export contains:
   MT5 digits/point/trade tick size, detector configs, study window, calendar,
   reference/context policy, and target policy.
 
-The audit payloads retain timeframe provenance, effective swing rank, raid and
+The audit envelope retains timeframe provenance, effective swing rank, raid and
 shift lag, FVG penetration/lifecycle metrics, session/context fields when
-supplied, and reason codes. M4.2 can therefore calculate breakdowns and
-parameter sensitivity without changing the M3 concept definition.
+supplied, evidence IDs, and reason codes. Payloads are deliberately compact:
+fields already present in the envelope are not duplicated, and research rows
+join to their setup by `setup_candidate_id` instead of copying the setup's full
+evidence history on every bar.
+
+## M4-PERF execution modes
+
+The production detector semantics are shared by both modes:
+
+- full audit/debug mode retains research facts and replay steps in memory;
+- the real-data pilot sets `retain_research_facts=False` and leaves
+  `retain_steps=False`, converting terminal research directly to compact
+  near-miss records and counters rather than duplicating them in the audit
+  event file. JSONL export writes one record at a time.
+
+`ExnessDataset.window()` releases validated source records outside the replay
+window while preserving the full-source SHA-256, quality report, and source row
+count. This changes memory ownership only; it does not bypass strict source
+validation.
+
+The hot path uses state-change-only raid observations, append-only
+`SetupEvidenceLink` records, incremental three-node swing hierarchy state,
+cross-timeframe price indexes with independent liquidity/structure lifecycle,
+and timeframe-specific setup scheduler lanes. The price index only selects
+references that can be breached by the current bar; the unchanged detector
+still decides breach, reclaim, and close-through semantics.
+
+The 2026-08-10 through 2026-08-17 cached XAUUSDm gate processed 1,992 bars in
+18.38 seconds total, including validation, replay, JSONL export, and M4.2
+analysis. Peak Windows process-tree memory was 369.5 MB working set and 332.3
+MB private bytes. The pre-hardening reference was about 139.6 seconds and more
+than 1 GB private memory. The optimized week emitted 7,704 meaningful raid
+observations instead of 24,690 while preserving core raid/shift/FVG/READY and
+near-miss semantics in equivalence tests.
 
 The `run_id` is the stable hash of that complete manifest. A config, calendar,
 source file, metadata, policy, or code-revision change therefore creates a new
@@ -133,7 +166,8 @@ experiment identity.
 
 ## M4.1.1 boundary
 
-M4.1.1 is code-complete once the ingestion/replay/audit contracts pass synthetic
+M4.1.1 and the M4-PERF week gate are code-complete once the
+ingestion/replay/audit contracts pass synthetic
 causality, warmup, manifest, calendar, reference, context, and near-miss
 regressions. It is not empirical validation: real
 Exness XAUUSD exports still have to be ingested and reviewed before M4.2 begins

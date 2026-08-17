@@ -113,6 +113,7 @@ class RaidEpisode(SchemaModel):
     observed_timeframes: list[Timeframe]
     observation_states: dict[Timeframe, RaidObservationState]
     breached_at: dict[Timeframe, AwareDatetime] = Field(default_factory=dict)
+    observation_extremes: dict[Timeframe, float] = Field(default_factory=dict)
     extreme: float = Field(gt=0.0)
 
     @model_validator(mode="after")
@@ -132,6 +133,10 @@ class RaidEpisode(SchemaModel):
             raise ValueError("every observed timeframe requires an observation state")
         if not set(self.observed_timeframes).issubset(self.breached_at):
             raise ValueError("every observed timeframe requires breached_at")
+        if not set(self.observation_extremes).issubset(self.observed_timeframes):
+            raise ValueError("observation extremes require an observed timeframe")
+        if any(value <= 0.0 for value in self.observation_extremes.values()):
+            raise ValueError("observation extremes must be positive")
         return self
 
 

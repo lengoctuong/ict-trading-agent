@@ -205,11 +205,24 @@ class M42ResearchAnalyzer:
                     _append_number(
                         raw["research.bars_after_raid"], metrics.get("bars_after_raid")
                     )
+        has_research_events = any(
+            event.category == FactType.RESEARCH_OBSERVATION.value for event in events
+        )
         for miss in replay.near_misses:
             if not miss.included_in_analysis:
                 continue
             _append_number(raw["near_miss.distance_bars"], miss.distance_bars)
             _append_number(raw["near_miss.excess_bars"], miss.excess_bars)
+            if not has_research_events:
+                metrics = miss.payload.get("metrics", {})
+                _append_number(
+                    raw["research.bars_after_shift"],
+                    metrics.get("bars_after_shift"),
+                )
+                _append_number(
+                    raw["research.bars_after_raid"],
+                    metrics.get("bars_after_raid"),
+                )
         return ({key: _describe(values) for key, values in sorted(raw.items())}, raw)
 
     def _sensitivity(

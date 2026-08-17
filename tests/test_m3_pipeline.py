@@ -204,7 +204,7 @@ def run_sequence(
     return batches, facts, candidates, setups
 
 
-def test_same_time_evidence_merges_have_distinct_transition_identity() -> None:
+def test_same_time_evidence_links_are_distinct_without_self_transitions() -> None:
     feed = ClosedBarFeed("XAUUSD")
     setups = SetupStore()
     setup = SetupCandidate(
@@ -231,28 +231,36 @@ def test_same_time_evidence_merges_have_distinct_transition_identity() -> None:
     )
     available_at = T0 + timedelta(minutes=5)
 
-    first = pipeline._append_transition(
+    first = pipeline._append_evidence_link(
         setup,
-        SetupStatus.DETECTED,
         T0,
         available_at,
         evidence_fact_ids=["observation-a"],
         reason_codes=["RAID_EPISODE_EVIDENCE_MERGED"],
     )
-    second = pipeline._append_transition(
+    second = pipeline._append_evidence_link(
         setup,
-        SetupStatus.DETECTED,
         T0,
         available_at,
         evidence_fact_ids=["observation-b"],
         reason_codes=["RAID_EPISODE_EVIDENCE_MERGED"],
     )
 
-    assert first.transition_id != second.transition_id
-    assert setups.current_view(setup.setup_candidate_id).evidence_fact_ids == [
+    assert first.evidence_link_id != second.evidence_link_id
+    current = setups.current_view(setup.setup_candidate_id)
+    assert current.status is SetupStatus.DETECTED
+    assert current.available_at == T0
+    assert current.evidence_fact_ids == [
         "observation-a",
         "observation-b",
     ]
+    assert setups.transitions(setup.setup_candidate_id) == ()
+    assert len(setups.evidence_links(setup.setup_candidate_id)) == 2
+    historical = setups.current(
+        setup.setup_candidate_id,
+        as_of=T0 + timedelta(minutes=4),
+    )
+    assert historical.evidence_fact_ids == []
 
 
 def ready_bars() -> list[OHLCBar]:
@@ -286,9 +294,12 @@ def test_full_m3_sequence_reaches_ready_for_llm_with_traceable_evidence() -> Non
     ]
     assert transition_statuses == [
         SetupStatus.FORMING,
-        SetupStatus.FORMING,
         SetupStatus.READY_FOR_LLM,
     ]
+    assert any(
+        link.reason_codes == ["LINKED_REPRICING_FVG_AVAILABLE"]
+        for link in setups.evidence_links(setup.setup_candidate_id)
+    )
     assert len(batches[-1].ready_for_llm) == 1
     payload = batches[-1].ready_for_llm[0]
     assert payload.setup.setup_candidate_id == setup.setup_candidate_id
@@ -1034,7 +1045,7 @@ def test_m5_fvg_inside_m15_shift_candle_is_linked_at_shift_close() -> None:
     assert zone.raw_features["temporal_relation"] == "inside_shift_bar"
     assert any(
         event.reason_codes == ["INSIDE_SHIFT_REPRICING_FVG_AVAILABLE"]
-        for event in batch.transitions
+        for event in batch.evidence_links
     )
 
 
@@ -1332,6 +1343,86 @@ def test_m5_take_m15_breach_then_next_m15_bar_reclaims_without_rebreach() -> Non
         item.metrics["dynamic_raid_extreme"] == 98.0
         for item in setups.visible(as_of=m15_b.close_time)
     )
+
+
+def test_breached_raid_emits_only_on_new_extreme_or_reclaim() -> None:
+    m5 = bar(0, open_=101.0, high=102.0, low=99.0, close=101.0)
+    m15_breach = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0,
+        close_time=T0 + timedelta(minutes=15),
+        open=101.0,
+        high=101.5,
+        low=98.0,
+        close=99.5,
+    )
+    m15_unchanged = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0 + timedelta(minutes=15),
+        close_time=T0 + timedelta(minutes=30),
+        open=99.5,
+        high=100.0,
+        low=98.2,
+        close=99.4,
+    )
+    m15_reclaim = OHLCBar(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M15,
+        open_time=T0 + timedelta(minutes=30),
+        close_time=T0 + timedelta(minutes=45),
+        open=99.4,
+        high=101.0,
+        low=98.4,
+        close=100.5,
+    )
+    feed = ClosedBarFeed("XAUUSD")
+    for item in (m5, m15_breach, m15_unchanged, m15_reclaim):
+        feed.append(item, observed_at=item.close_time)
+    facts = FactStore()
+    facts.extend(
+        [
+            reference_fact(
+                fact_id="pdl-100",
+                fact_type=FactType.PREVIOUS_DAY_LEVEL,
+                timeframe=Timeframe.H1,
+                side="low",
+                price=100.0,
+            ),
+            *(candle_fact(item) for item in (m5, m15_breach, m15_unchanged, m15_reclaim)),
+        ]
+    )
+    candidates = CandidateStore()
+    candidates.append(raid_candidate(m5))
+    m3 = M3SetupPipeline(
+        bar_feed=feed,
+        fact_store=facts,
+        candidate_store=candidates,
+        setup_store=SetupStore(),
+        tick_size=0.1,
+    )
+
+    m3.process_latest(timeframe=Timeframe.M5, as_of=m5.close_time)
+    breached = m3.process_latest(
+        timeframe=Timeframe.M15, as_of=m15_breach.close_time
+    )
+    unchanged = m3.process_latest(
+        timeframe=Timeframe.M15, as_of=m15_unchanged.close_time
+    )
+    reclaimed = m3.process_latest(
+        timeframe=Timeframe.M15, as_of=m15_reclaim.close_time
+    )
+
+    assert len(breached.raid_updates) == 1
+    assert unchanged.raid_updates == []
+    assert not any(
+        fact.fact_type is FactType.RAID_OBSERVATION for fact in unchanged.facts
+    )
+    assert len(reclaimed.raid_updates) == 1
+    assert reclaimed.raid_updates[0].observation_state.value == "reclaimed"
+    episode = m3.raid_store.current_view(reclaimed.raid_updates[0].raid_episode_id)
+    assert episode.observation_extremes[Timeframe.M15] == 98.0
 
 
 def test_m15_candle_containing_raid_updates_dynamic_extreme_without_invalidation() -> (

@@ -1,147 +1,487 @@
-Check lại. Lần này **raw source mới đã có M4.1.1 thật**: `M4ReplayEngine.version = "0.1.1"`, có `m4_support.py`, study window, experiment manifest, Exness calendar, dynamic context và causal reference builder.
+Đã check. Có một chuyện giống vụ cache trước: trang commit hiện chỉ index tới `8ae4c02`, nhưng raw `main` đã mới hơn — `M4ReplayEngine.version = 0.1.2`, đã có progress callback, store indexes/views và active raid/breach tracking. Vì vậy tôi review **`8ae4c02` + raw HEAD hiện tại**, thay vì tin commit-list đang stale. ([GitHub][1])
 
-## Kết quả review lại M4.1.1
+## Kết luận
 
-| Status                    | Task                          | Hiểu đơn giản                                      | Review                                                                                                                                                                                                                                                                       | Confidence | Need review      |
-| ------------------------- | ----------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------: | ---------------- |
-| ✅ DONE                    | Warm-up                       | Có history trước ngày bắt đầu thống kê             | `replay_start < analysis_start`, warm-up vẫn chạy detector nhưng không tính vào analysis.                                                                                                                                                                                    |        98% | Không            |
-| ✅ DONE                    | Reproducible run              | Biết chính xác data/code/config nào tạo result     | Manifest đã hash git SHA, M2/M3/M4 version, source hashes, symbol metadata, detector configs, M3 policy, calendar/reference/context/target policy.                                                                                                                           |        99% | Không            |
-| ✅ DONE                    | MT5 symbol metadata           | Không đoán tick size/digits                        | Có adapter từ `MT5.symbol_info()` và engine dùng `trade_tick_size`.                                                                                                                                                                                                          |        98% | Không            |
-| ✅ DONE                    | Exness D1 / PDH-PDL           | PDH/PDL lấy từ D1 Exness thật                      | `build_exness_xauusd_intraday_v0()` dùng UTC + native D1; reference builder chỉ emit sau D1 close.                                                                                                                                                                           |        97% | Không            |
-| ✅ DONE                    | Dynamic session context infra | Mỗi timestamp biết context NY/DST                  | `SessionContextProvider` convert UTC → `America/New_York`, lưu cả sessions + NY timestamp.                                                                                                                                                                                   |        96% | **Có**, xem dưới |
-| ✅ DONE                    | Session H/L causal builder    | Không hindsight Asia/London H/L                    | Chỉ emit session high/low khi complete source window.                                                                                                                                                                                                                        |        97% | Không            |
-| ✅ DONE                    | Exness calendar framework     | Market closure không bị coi là missing bars        | Có regular calendar + exceptional closures explicit.                                                                                                                                                                                                                         |        92% | Không            |
-| 🟠 **FIX trước M4.2**     | **Session overlap semantics** | London và NY AM có thể cùng active                 | Current provider bắt phải chọn `primary_session`; nếu overlap mà không priority thì raise. Tôi không muốn research ép một session thắng session kia.                                                                                                                         |    **97%** | **Có**           |
-| 🟠 **FIX trước dùng TDO** | **TDO availability**          | 00:00 NY open được biết ngay lúc 00:00             | Builder hiện để TDO `available_at = bar.close_time`, tức M5 source thì trễ 5 phút.                                                                                                                                                                                           |    **95%** | Không            |
-| 🟡 VERIFY DATA            | Exness exact closure minutes  | Đừng tin lịch hard-code trước khi nhìn actual feed | Code dùng precise `20:58→22:02` summer / `21:58→23:02` winter. Exness official xác nhận UTC+0, US DST và XAU thường đóng quanh rollover, nhưng trang public hiện mô tả rollover thường 21:00/22:00 và kéo dài 1–2 giờ chứ không chứng minh trực tiếp các phút hard-code đó.  |        85% | Không            |
+**Vấn đề hiệu suất là thật và phân tích trong `performance-chat.md` đúng.**
 
-## Issue mới quan trọng nhất: session overlap
+Benchmark ghi nhận 398 records chạy ~8.9s, nhưng 1,991 records lên ~139.6s; một tuần sinh tới 24,690 raid observations, 15,865 research observations, 1,260 setups và 17,035 near-misses. Input tăng ~5× nhưng runtime tăng ~15.7×, nên đây rõ ràng không phải scaling tuyến tính. ([GitHub][2])
 
-Ta đã chọn session là **context, không phải hard filter**. Nhưng current API:
+Điểm cốt lõi có thể hiểu rất đơn giản:
+
+> **Engine hiện đang “mỗi cây nến đi kiểm tra lại quá nhiều thứ đã biết”, thay vì “chỉ xử lý những gì vừa thay đổi”.**
+
+Không phải ICT quá phức tạp.
+
+---
+
+## Những tối ưu 2 commit vừa rồi đã làm được
+
+Code hiện đã cải thiện đáng kể phần triệu chứng:
+
+* `FactStore` / `CandidateStore` có index theo symbol/TF/type/time và có `*_view()` để hot path không deep-copy object liên tục.
+* M3 đã giữ `_active_breaches` và `_active_episode_ids`, không còn hoàn toàn scan toàn bộ raid history ở mọi nơi.
+* M4 có progress callback và lookup chính xác theo timestamp/candidate indexes.
+
+Nhưng đây chưa chạm đủ sâu vào root.
+
+---
+
+# Root cause còn lại
+
+### 1. Raid đang phát event dù **không có thông tin mới**
+
+Đây là lỗi lớn nhất.
+
+Trong `_observe_existing_episodes()`, nếu raid đang `BREACHED`, bar tiếp theo vẫn tạo `RAID_OBSERVATION` + `RaidEpisodeUpdate`, kể cả bar đó không tạo extreme mới và cũng chưa reclaim.
+
+Ví dụ:
 
 ```text
-sessions = [LONDON, NY_AM]
-primary_session = ?
+SSL = 3300
+
+Bar 1: low 3298 → BREACHED     ← có ý nghĩa
+Bar 2: low 3299 → vẫn dưới level
+Bar 3: low 3299.5
+Bar 4: low 3299
+Bar 5: low 3297 → NEW EXTREME  ← có ý nghĩa
+Bar 6: close 3302 → RECLAIMED  ← có ý nghĩa
 ```
 
-và nếu hai window overlap mà chưa đặt priority, code raise error.
-
-Tôi không thích giải bằng:
+Hiện tại gần như:
 
 ```text
-NY_AM > LONDON
+1 2 3 4 5 6
+↓ ↓ ↓ ↓ ↓ ↓
+event event event event event event
 ```
-
-vì sẽ mất thông tin research.
 
 Tôi muốn:
 
 ```text
-sessions = [LONDON, NY_AM]
-primary_session = optional
+Bar 1 → BREACHED
+Bar 5 → NEW_EXTREME
+Bar 6 → RECLAIMED
 ```
 
-và M4 breakdown làm **multi-label**:
+Bar 2–4 **không mất dữ liệu market**; raw OHLC đã tồn tại rồi.
 
-```text
-setup counted in:
-- London
-- NY_AM
-- London+NY_AM overlap
-```
-
-Sau này LLM cũng được nhìn cả hai.
-
-**Không nên buộc market phải thuộc đúng một session.**
+Đây là fix vừa tăng tốc vừa làm audit sạch hơn.
 
 ---
 
-## TDO có một lỗi semantic nhỏ
+### 2. Evidence đang giả làm `SetupTransition`
 
-Code hiện tạo TDO:
+Mỗi raid observation lại gọi `_merge_episode_evidence()`, và code tạo transition:
 
 ```text
-00:00 NY M5 bar opens
+DETECTED → DETECTED
+FORMING  → FORMING
+```
+
+chỉ để thêm evidence.
+
+Sau đó mỗi transition lại merge:
+
+```text
+old evidence list
++ new evidence
+→ SetupCandidate mới
+```
+
+Evidence list càng dài thì càng copy nhiều.
+
+Conceptually cũng không sạch:
+
+```text
+Transition
+= state changed
+
+EvidenceLink
+= có thêm evidence
+```
+
+Hai thứ nên tách.
+
+---
+
+### 3. Swing hierarchy vẫn tính lại toàn bộ lịch sử
+
+Current:
+
+```python
+history = list(facts)
+
+for ...
+    source = [fact for fact in history ...]
+    sort(...)
+    scan triples...
+```
+
+mỗi lần có bar mới.
+
+Nhưng để promote swing ta thực chất chỉ cần:
+
+```text
+3 STH mới nhất
+→ kiểm tra middle có thành ITH không
+
+3 ITH mới nhất
+→ kiểm tra middle có thành LTH không
+```
+
+Không cần đọc lại 5,000 swings cũ.
+
+---
+
+### 4. M2 vẫn thử **mọi reference level** với mỗi bar
+
+Pipeline hiện lấy toàn bộ active:
+
+```text
+Swing
+Session level
+PDH/PDL
+```
+
+rồi:
+
+```python
+for reference_fact in reference_facts:
+    detect(bar, reference)
+```
+
+
+
+Nhưng candle:
+
+```text
+low=3320
+high=3330
+```
+
+không cần kiểm tra level:
+
+```text
+3100
+3200
+3500
+3600
 ...
-00:05 bar closes
-→ TDO becomes available
 ```
 
-
-
-Nhưng concept đúng phải là:
-
-```text
-00:00 NY
-→ open price đã biết
-→ TDO level exists
-```
-
-Hệ thống vẫn chỉ ra decision trên closed bars, không vấn đề. Nhưng fact phải phản ánh:
-
-```text
-occurred_at = 00:00
-available_at = 00:00
-```
-
-hoặc có riêng `observed_at` nếu replay engine cần log lúc ingest.
-
-Không nên encode sai concept chỉ vì implementation closed-bar.
+Chỉ query các active level nằm trong price range candle.
 
 ---
 
-# Exness calendar: không blocker architecture nữa
+### 5. M3 vẫn duyệt **mọi setup lịch sử** mỗi bar
 
-Exness xác nhận server trading clock là **UTC+0**, DST schedule theo instrument, và gold thường đóng trong rollover; rollover thường bắt đầu 21:00 UTC mùa hè / 22:00 UTC mùa đông. ([Exness Help Center][1])
+Trong `_process_bar()` hiện vẫn gọi `setup_store.visible_views(...)` rồi loop toàn bộ visible setups.
 
-Current `ExnessXauCalendarPreset` đã đúng hướng: regular closure + exceptional holidays riêng.
+Terminal setup còn được đưa qua `_observe_terminal_setup()` cho post-terminal research. Cơ chế research đúng, nhưng scheduler phải biết setup nào hiện còn trong research horizon thay vì scan tất cả setup từng tồn tại.
 
-Nhưng khi có CSV thật tôi muốn làm:
+---
+
+### 6. RAM issue nằm ở audit representation
+
+`_AuditCollector` giữ toàn bộ `M4AuditEvent` + full payload trong RAM. Sau replay M4 lại tạo thêm:
 
 ```text
-actual XAU gaps
+raw_events
+events
+event_map
+near_misses
+steps
+analysis_events
+analysis_misses
+```
+
+và summary tiếp tục tạo các list `bars/facts/candidates/transitions/...`.
+
+Đặc biệt `near_miss` còn mang lại payload của source event, nên dễ duplicate lượng data lớn.
+
+Vì vậy working/private memory tăng rất nhanh là hợp lý với benchmark trong `performance-chat.md`. ([GitHub][2])
+
+---
+
+# Tôi đồng ý với hướng redesign trong `performance-chat.md`
+
+Và tôi muốn biến nó thành **M4 Performance Hardening**, chưa sang empirical M4.2.
+
+| Priority | Task                        | Answer đơn giản                                       | Cách dev                                                                                                                         | Confidence | Need review                                       |
+| -------- | --------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------: | ------------------------------------------------- |
+| **P0**   | State-change-only raid      | Không thay đổi thì không sinh event                   | Emit chỉ khi `NOT_SEEN→BREACHED`, `new global/per-TF extreme`, `BREACHED→RECLAIMED`; raw bars vẫn giữ                            |    **99%** | **Có**, vì liên quan evidence semantics           |
+| **P0**   | Evidence ≠ Transition       | Thêm evidence không phải đổi trạng thái setup         | Tạo append-only `SetupEvidenceLink`; `SetupTransition` chỉ dùng khi status thật sự đổi                                           |    **99%** | Không                                             |
+| **P0**   | Incremental swing hierarchy | Không đọc lại toàn bộ swing cũ                        | Giữ rolling 3 swing theo `(symbol, TF, side, rank)`; promotion mới feed tiếp rank trên                                           |    **98%** | **Có**, phải chứng minh output giống algorithm cũ |
+| **P0**   | Price-index references      | Candle chỉ kiểm tra level nó thực sự chạm             | Active BSL/SSL sorted index + range query theo `[low,high]`; taken lifecycle remove khỏi liquidity index, structural index riêng |    **97%** | **Có**, không được miss cross-TF level            |
+| **P0**   | Active setup scheduler      | Không hỏi 1,000 setup cũ mỗi bar                      | Queue/index theo `state + relevant TF + bar-count deadline`; M15 bar chỉ wake setup cần M15, M5 tương tự                         |    **98%** | **Có**, vì expiry/MTF semantics                   |
+| **P1**   | Compact research scheduler  | Terminal setup chỉ được xem trong horizon             | Schedule đến đúng `post_terminal_research_bars`, hết horizon remove                                                              |    **99%** | Không                                             |
+| **P1**   | Stream audit                | Log hết nhưng không giữ hết RAM                       | append JSONL/event stream ngay lúc event sinh; RAM giữ active state + counters thôi                                              |    **98%** | Không                                             |
+| **P1**   | Incremental summary         | Không đợi cuối run mới scan lại hàng trăm nghìn event | Counter/histogram update khi stream event; near-miss chỉ giữ source ID + threshold metrics                                       |    **99%** | Không                                             |
+| **P1**   | Remove heavy replay `steps` | Không duplicate hàng nghìn event IDs                  | production research mode chỉ lưu timing/count per step hoặc stream riêng; detailed steps optional debug mode                     |    **97%** | Không                                             |
+| **Gate** | Semantic equivalence tests  | Tăng tốc nhưng không được mất setup                   | Old vs new trên fixture: same raid episodes, extremes, shifts, FVGs, lifecycle, READY outputs; audit spam được phép giảm         |    **99%** | **Có, rất quan trọng**                            |
+| **Gate** | Benchmark                   | Phải chứng minh scaling đã hết bệnh                   | 1 day → 1 week → full; profile acquisition/replay/export riêng                                                                   |    **99%** | Không                                             |
+
+---
+
+## Điểm cần đặc biệt cẩn thận
+
+### Incremental swing không được đổi ICT semantics
+
+Đây là optimization dễ viết sai nhất.
+
+Muốn:
+
+```text
+STH1, STH2, STH3
+→ STH2 promoted ITH
+
+ITH1, ITH2, ITH3
+→ ITH2 promoted LTH
+```
+
+Promotion mới chỉ được available khi swing bên phải đã confirm, y như algorithm hiện tại.
+
+Nên tôi yêu cầu test kiểu:
+
+```text
+old full-history promoter
 vs
-calendar expected gaps
+new incremental promoter
+
+→ exact same promotion IDs
+→ exact same available_at
+→ exact same rank
 ```
 
-Nếu actual Exness bars là:
+trên synthetic + random sequence.
 
-```text
-20:55 → 22:05
-```
-
-thì calendar phải learn/validate theo actual schedule, không mở rộng closure chỉ để loader pass.
+Không chỉ unit-test vài case đẹp.
 
 ---
 
-# M4 hiện tại tôi đánh thế này
+## Price index cũng không được làm giảm recall
+
+Index chỉ là:
 
 ```text
-M4.1 replay skeleton          PASS
-M4.1.1 hardening              ~95% PASS
-M3 semantics                  FROZEN
-
-Còn trước first serious replay:
-1. session overlap multi-label
-2. TDO availability semantics
+"reference nào có khả năng được candle chạm?"
 ```
 
-Hai patch này nhỏ. **Không cần M4.1.2 lớn.**
+**không được** biến thành thêm ICT filtering.
 
-Sau đó sang **M4.2 real empirical run**:
+Sau query, detector hiện tại vẫn quyết:
 
-| M4.2 task                   | Answer đơn giản                               | Need review            |
-| --------------------------- | --------------------------------------------- | ---------------------- |
-| Load real Exness XAU        | Chạy market thật                              | Không                  |
-| Validate calendar/data gaps | Data có sạch không                            | Không                  |
-| First multi-month replay    | Xem detector bắt được gì                      | Có                     |
-| Detection distributions     | Reclaim/shift/FVG/reaction thường mất bao lâu | **Có**                 |
-| Near-miss analysis          | Current parameters đang miss gì               | **Có, rất quan trọng** |
-| Chart sampling              | Bạn nhìn trực tiếp concept có đúng không      | **Có, bắt buộc**       |
-| Parameter sensitivity       | Tune `3/12/8/4/24/16/6` bằng data             | **Có**                 |
-| Outcome MFE/MAE             | Setup sau đó chạy tốt/xấu thế nào             | Có                     |
-| Regression cases            | Khóa các XAU setup đã review thành tests      | Không                  |
+```text
+breach?
+reclaim?
+structure close-through?
+```
 
-**Kết luận:** patch session-overlap + TDO semantics rồi bắt đầu M4.2. Không thấy lý do quay lại M3.
+Tức:
 
-[1]: https://get.exness.help/hc/en-us/articles/4405235684498-Instrument-trading-hours "Instrument trading hours – Exness Help Center"
+```text
+index = acceleration
+không phải strategy rule
+```
+
+Đây là distinction rất quan trọng.
+
+---
+
+## Setup scheduler phải giữ MTF
+
+Một setup M15/M5 có thể cần:
+
+```text
+M15
+→ shift / invalidation
+
+M5
+→ FVG / reaction
+
+post-terminal
+→ M15 + M5 research
+```
+
+Nên scheduler không đơn giản:
+
+```text
+setup belongs to one TF
+```
+
+mà là:
+
+```text
+setup_id
+├── wake_on_M15
+├── wake_on_M5
+└── deadline per purpose
+```
+
+Nếu optimize bằng cách chỉ đưa setup vào một queue thì rất dễ miss concept.
+
+---
+
+# Có nên stream audit trước không?
+
+Tôi đồng ý với `performance-chat.md` rằng **không nên coi streaming là root fix**. File cũng nói rõ streaming giải quyết RAM nhưng không giải quyết lượng công việc/event thừa. ([GitHub][2])
+
+Order đúng là:
+
+```text
+1. Giảm event thừa
+2. Giảm scan thừa
+3. Active scheduling/index
+4. Stream audit
+```
+
+Streaming có thể code song song về engineering, nhưng benchmark chính chỉ có ý nghĩa sau 1–3.
+
+---
+
+# Có nên multithread / multiprocessing?
+
+**Chưa.**
+
+Core replay hiện intentionally chạy theo `close_time`, cùng timestamp xử lý TF theo thứ tự M1→M5→M15→H1→..., và các TF dùng chung raid/setup state.
+
+Parallel lúc này sẽ:
+
+```text
+algorithm chậm
++ synchronization
++ race conditions
++ RAM cao hơn
+```
+
+chứ không sửa root.
+
+Sau này parallel được ở:
+
+```text
+experiment A / B / C
+symbol A / B
+chart rendering
+outcome analysis
+```
+
+sau khi event stream đã freeze.
+
+---
+
+# Một improvement tôi thêm ngoài `performance-chat.md`
+
+**Đừng mặc định tạo object setup nặng cho cả H1 + M15 nếu bottleneck vẫn còn sau scheduler.**
+
+Hiện mỗi raid tạo 2 setup hypotheses theo `setup_timeframes=(H1,M15)`.
+
+Tuy nhiên **không được giải quyết bằng cách bỏ H1 hoặc M15**, vì sẽ giảm recall.
+
+Nếu scheduler vẫn nặng, có thể lazy-materialize:
+
+```text
+RaidEpisode
+├── lightweight waiting hypothesis M15
+└── lightweight waiting hypothesis H1
+
+M15 shift xuất hiện
+→ materialize M15 SetupCandidate
+
+H1 shift xuất hiện
+→ materialize H1 SetupCandidate
+```
+
+Về ICT semantics vẫn giữ cả hai hypothesis; chỉ tránh tạo full evidence-bearing object trước khi có shift.
+
+Tôi để cái này **P2**, chưa cần làm ngay.
+
+---
+
+## Performance gate trước khi tiếp tục M4.2
+
+Target trong `performance-chat.md` là week sample **≤30 giây và RAM <400 MB**; tôi thấy đây là engineering gate hợp lý, không phải ICT parameter. ([GitHub][2])
+
+Tôi còn thêm một gate quan trọng hơn:
+
+> **Meaningful event count phải scale theo actual market events, không scale theo `raid × số bar × số setup`.**
+
+Ví dụ cùng dataset 1 tuần, sau refactor tôi kỳ vọng `raid_observation` giảm rất mạnh từ 24,690 xuống gần số:
+
+```text
+first breach
++ new extreme
++ reclaim
+```
+
+thực sự xảy ra. Không đặt con số cứng trước khi benchmark.
+
+### Trạng thái milestone
+
+```text
+M3       FROZEN ✅
+M4.1     PASS ✅
+M4.1.1   PASS ✅
+M4-PERF  BLOCKING M4.2 🔴
+M4.2     chưa chạy full
+```
+
+Tôi sẽ **không tune ICT parameter hoặc đọc PnL trước khi M4-PERF pass**. Nếu engine đang tự tạo 20–30k audit event thừa mỗi tuần thì parameter analysis sẽ vừa chậm vừa khó audit.
+
+[1]: https://github.com/lengoctuong/ict-trading-agent/commit/8ae4c02 "feat: harden M4 replay prerequisites · lengoctuong/ict-trading-agent@8ae4c02 · GitHub"
+[2]: https://github.com/lengoctuong/ict-trading-agent/blob/main/chat_web/performance-chat.md "ict-trading-agent/chat_web/performance-chat.md at main · lengoctuong/ict-trading-agent · GitHub"
+
+---
+
+# Codex implementation update — 2026-08-17
+
+Đã implement M4-PERF theo đúng thứ tự trên, không đổi ICT parameter:
+
+```text
+P0.1 state-change-only raid observations       PASS
+P0.2 SetupEvidenceLink != SetupTransition      PASS
+P0.3 incremental rolling swing hierarchy       PASS
+P0.4 active cross-TF price reference index     PASS
+P0.5 MTF setup scheduler lanes                  PASS
+P1   compact research/audit/near-miss/steps     PASS (pilot mode)
+```
+
+Semantic gates:
+
+- `SetupTransition` bắt buộc đổi status; evidence-only update là append-only
+  `SetupEvidenceLink`.
+- Swing incremental được so exact ID, `available_at`, rank, source IDs với
+  full-history promoter trên nested fixture và 20 random streams.
+- Price index được so với full detector scan và giữ M5/M15/H1 cross-TF recall;
+  liquidity `TAKEN` và structural inactivity vẫn độc lập.
+- Full-audit và compact-pilot mode có cùng core raid/shift/FVG/transition/READY,
+  setup summary và near-miss identity trên regression fixture.
+- 109 tests pass.
+
+Benchmark cùng cached Exness XAUUSDm:
+
+```text
+before: 1 week / 1,991 bars ~= 139.6 s, >1 GB private memory
+after:  1 week / 1,992 bars = 18.38 s total
+peak:   369.5 MB working set / 332.3 MB private bytes
+raid_observation: 24,690 -> 7,704
+research_observation: 14,751 (summary preserved, compact storage)
+near-miss: 16,343 (summary preserved)
+```
+
+`18.38 s` gồm validate raw cache, replay, JSONL export và M4.2 analysis. Week
+gate `<=30 s` và RAM `<400 MB` đã PASS.
+
+Full cached warmup + analysis range đã được thử và chủ động dừng sau 3 phút để
+không quay lại kiểu chạy mù/đè máy. Đây là long-run gate còn OPEN; week blocker
+đã được gỡ nhưng chưa được phép ghi full-range artifact là PASS.
+
+Trạng thái:
+
+```text
+M3       FROZEN ✅
+M4.1     PASS ✅
+M4.1.1   PASS ✅
+M4-PERF  WEEK GATE PASS ✅
+M4.2     machine report chạy được; full-range + chart review còn OPEN
+CHART    PENDING_USER_REVIEW
+```

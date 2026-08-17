@@ -29,7 +29,7 @@ from .enums import (
     Timeframe,
 )
 from .facts import ObservableFact, PriceGeometry
-from .lifecycle import SetupTransition
+from .lifecycle import SetupEvidenceLink, SetupTransition
 from .market import ClosedBarFeed, OHLCBar
 from .stores import (
     CandidateStore,
@@ -139,6 +139,7 @@ class M3DetectionBatch(SchemaModel):
     raid_episodes_created: list[RaidEpisode] = Field(default_factory=list)
     raid_updates: list[RaidEpisodeUpdate] = Field(default_factory=list)
     setups_created: list[SetupCandidate] = Field(default_factory=list)
+    evidence_links: list[SetupEvidenceLink] = Field(default_factory=list)
     transitions: list[SetupTransition] = Field(default_factory=list)
     ready_for_llm: list[ReadyForLLMPayload] = Field(default_factory=list)
 
@@ -165,6 +166,7 @@ class M3SetupPipeline:
         policy: M3Policy | None = None,
         target_candidates: Sequence[TargetCandidate] = (),
         context: Mapping[str, Any] | None = None,
+        retain_research_facts: bool = True,
     ) -> None:
         self.bar_feed = bar_feed
         self.fact_store = fact_store
@@ -178,6 +180,7 @@ class M3SetupPipeline:
             target.model_copy(deep=True) for target in target_candidates
         )
         self.context = dict(context or {})
+        self.retain_research_facts = retain_research_facts
         self._active_breaches: dict[
             Timeframe, dict[str, ObservableFact]
         ] = {}
@@ -281,6 +284,7 @@ class M3SetupPipeline:
         episodes_created: list[RaidEpisode] = []
         raid_updates: list[RaidEpisodeUpdate] = []
         setups_created: list[SetupCandidate] = []
+        evidence_links: list[SetupEvidenceLink] = []
         transitions: list[SetupTransition] = []
         ready: list[ReadyForLLMPayload] = []
 
@@ -317,13 +321,13 @@ class M3SetupPipeline:
             if update is not None:
                 raid_updates.append(update)
             setups_created.extend(created)
-            transitions.extend(merged)
+            evidence_links.extend(merged)
 
         observed_facts, observed_updates, merged = self._observe_existing_episodes(bar)
         self._append_facts(observed_facts)
         facts.extend(observed_facts)
         raid_updates.extend(observed_updates)
-        transitions.extend(merged)
+        evidence_links.extend(merged)
 
         for observation in observed_facts:
             if (
@@ -351,26 +355,29 @@ class M3SetupPipeline:
             if update is not None:
                 raid_updates.append(update)
             setups_created.extend(created)
-            transitions.extend(promoted_transitions)
+            evidence_links.extend(promoted_transitions)
 
+        scheduled_setups = self.setup_store.scheduled_views(
+            timeframe=bar.timeframe,
+            as_of=bar.close_time,
+            symbol=bar.symbol,
+        )
         invalidation_snapshot = {
             setup.setup_candidate_id: (
                 setup.hard_invalidation_price,
                 setup.available_at,
             )
-            for setup in self.setup_store.visible_views(
-                as_of=bar.close_time,
-                symbol=bar.symbol,
-            )
+            for setup in scheduled_setups
         }
 
-        for setup in list(
-            self.setup_store.visible_views(
-                as_of=bar.close_time,
-                symbol=bar.symbol,
-            )
-        ):
+        for setup in scheduled_setups:
             if setup.status in TERMINAL_SETUP_STATUSES:
+                horizon = self.policy.post_terminal_research_bars.get(bar.timeframe)
+                if horizon is None or self._bars_since(setup.available_at, bar) > horizon:
+                    self.setup_store.retire_schedule_lane(
+                        setup.setup_candidate_id, bar.timeframe
+                    )
+                    continue
                 research = self._observe_terminal_setup(setup, bar)
                 self._append_facts(research)
                 facts.extend(research)
@@ -405,7 +412,7 @@ class M3SetupPipeline:
                     transitions.append(transition)
                     if transition.to_status == SetupStatus.FORMING:
                         setup = self.setup_store.current_view(setup.setup_candidate_id)
-                        inside_zones, zone_transition, inside_research = (
+                        inside_zones, zone_event, inside_research = (
                             self._maybe_link_inside_shift_fvg(
                                 setup,
                                 new_candidates,
@@ -416,21 +423,25 @@ class M3SetupPipeline:
                         self._append_facts(inside_research)
                         candidates.extend(inside_zones)
                         facts.extend(inside_research)
-                        if zone_transition is not None:
-                            transitions.append(zone_transition)
+                        if isinstance(zone_event, SetupTransition):
+                            transitions.append(zone_event)
+                        elif zone_event is not None:
+                            evidence_links.append(zone_event)
 
             setup = self.setup_store.current_view(setup.setup_candidate_id)
             if (
                 setup.status == SetupStatus.FORMING
                 and bar.timeframe == setup.entry_timeframe
             ):
-                zones, transition, research = self._maybe_link_fvg(setup, bar)
+                zones, setup_event, research = self._maybe_link_fvg(setup, bar)
                 self._append_candidates(zones)
                 self._append_facts(research)
                 candidates.extend(zones)
                 facts.extend(research)
-                if transition is not None:
-                    transitions.append(transition)
+                if isinstance(setup_event, SetupTransition):
+                    transitions.append(setup_event)
+                elif setup_event is not None:
+                    evidence_links.append(setup_event)
 
             setup = self.setup_store.current_view(setup.setup_candidate_id)
             if (
@@ -462,6 +473,7 @@ class M3SetupPipeline:
             raid_episodes_created=episodes_created,
             raid_updates=raid_updates,
             setups_created=setups_created,
+            evidence_links=evidence_links,
             transitions=transitions,
             ready_for_llm=ready,
         )
@@ -555,7 +567,7 @@ class M3SetupPipeline:
                         ),
                     }
                 },
-                deep=True,
+                deep=False,
             )
             facts.append(reclaim)
             reclaimed_now.append(breach.fact_id)
@@ -632,6 +644,9 @@ class M3SetupPipeline:
                     observed_timeframes=[bar.timeframe],
                     observation_states={bar.timeframe: state},
                     breached_at={bar.timeframe: breach.occurred_at},
+                    observation_extremes={
+                        bar.timeframe: float(breach.metrics["extreme"])
+                    },
                     extreme=float(breach.metrics["extreme"]),
                 )
                 self.raid_store.append_episode(episode)
@@ -725,7 +740,7 @@ class M3SetupPipeline:
                     "reclaim_span_bars": raid.raw_features.get("reclaim_span_bars", 0),
                 }
             },
-            deep=True,
+            deep=False,
         )
 
     def _raid_candidate_from_observation(
@@ -831,6 +846,9 @@ class M3SetupPipeline:
                 observed_timeframes=[raid.timeframe],
                 observation_states={raid.timeframe: RaidObservationState.RECLAIMED},
                 breached_at={raid.timeframe: raid.occurred_at},
+                observation_extremes={
+                    raid.timeframe: float(raid.raw_features["extreme"])
+                },
                 extreme=float(raid.raw_features["extreme"]),
             )
             self.raid_store.append_episode(episode)
@@ -969,9 +987,9 @@ class M3SetupPipeline:
         observation: ObservableFact,
         *,
         raid_candidate_id: str | None,
-    ) -> list[SetupTransition]:
+    ) -> list[SetupEvidenceLink]:
         current_episode = self.raid_store.current_view(episode_id)
-        transitions: list[SetupTransition] = []
+        links: list[SetupEvidenceLink] = []
         for setup in self.setup_store.by_raid_episode_views(
             episode_id,
             as_of=observation.available_at,
@@ -979,12 +997,16 @@ class M3SetupPipeline:
         ):
             if setup.status in TERMINAL_SETUP_STATUSES:
                 continue
-            transitions.append(
-                self._append_transition(
-                    setup,
-                    setup.status,
-                    observation.occurred_at,
-                    observation.available_at,
+            link = SetupEvidenceLink(
+                    evidence_link_id=_event_id(
+                        "setup-evidence",
+                        setup.setup_candidate_id,
+                        observation.fact_id,
+                        raid_candidate_id or "observation-only",
+                    ),
+                    setup_candidate_id=setup.setup_candidate_id,
+                    occurred_at=observation.occurred_at,
+                    available_at=observation.available_at,
                     evidence_candidate_ids=(
                         [raid_candidate_id] if raid_candidate_id is not None else []
                     ),
@@ -999,18 +1021,21 @@ class M3SetupPipeline:
                         "dynamic_raid_extreme": current_episode.extreme,
                     },
                 )
-            )
-        return transitions
+            self.setup_store.append_evidence_link(link)
+            links.append(link)
+        return links
 
     def _observe_existing_episodes(
         self,
         bar: OHLCBar,
-    ) -> tuple[list[ObservableFact], list[RaidEpisodeUpdate], list[SetupTransition]]:
+    ) -> tuple[
+        list[ObservableFact], list[RaidEpisodeUpdate], list[SetupEvidenceLink]
+    ]:
         if bar.timeframe not in self.policy.raid_observation_timeframes:
             return [], [], []
         facts: list[ObservableFact] = []
         updates: list[RaidEpisodeUpdate] = []
-        transitions: list[SetupTransition] = []
+        evidence_links: list[SetupEvidenceLink] = []
         if bar.timeframe not in self._active_episodes_initialized:
             for episode in self.raid_store.visible_views(
                 as_of=bar.close_time, symbol=bar.symbol
@@ -1049,16 +1074,30 @@ class M3SetupPipeline:
             if reference.side == LiquiditySide.BUY_SIDE:
                 breached = bar.high > level
                 reclaimed = bar.close < level
-                extreme = bar.high
                 direction = Direction.BEARISH
+                prior_extreme = episode.observation_extremes.get(
+                    bar.timeframe, level
+                )
+                new_extreme = bar.high > prior_extreme
+                extreme = max(prior_extreme, bar.high)
             else:
                 breached = bar.low < level
                 reclaimed = bar.close > level
-                extreme = bar.low
                 direction = Direction.BULLISH
+                prior_extreme = episode.observation_extremes.get(
+                    bar.timeframe, level
+                )
+                new_extreme = bar.low < prior_extreme
+                extreme = min(prior_extreme, bar.low)
             if direction != episode.direction:
                 continue
             if previous_state == RaidObservationState.NOT_SEEN and not breached:
+                continue
+            if (
+                previous_state == RaidObservationState.BREACHED
+                and not reclaimed
+                and not new_extreme
+            ):
                 continue
             breached_at = episode.breached_at.get(bar.timeframe, bar.open_time)
             state = (
@@ -1100,21 +1139,23 @@ class M3SetupPipeline:
                         ),
                         "reclaim_span_bars": reclaim_span,
                         "breached_this_bar": breached,
+                        "state_changed": state != previous_state,
+                        "new_timeframe_extreme": new_extreme,
                     }
                 },
-                deep=True,
+                deep=False,
             )
             update = self._append_raid_update(episode, observation)
             facts.append(observation)
             updates.append(update)
-            transitions.extend(
+            evidence_links.extend(
                 self._merge_episode_evidence(
                     episode.raid_episode_id,
                     observation,
                     raid_candidate_id=None,
                 )
             )
-        return facts, updates, transitions
+        return facts, updates, evidence_links
 
     def _maybe_invalidate(
         self,
@@ -1159,7 +1200,11 @@ class M3SetupPipeline:
         self,
         setup: SetupCandidate,
         bar: OHLCBar,
-    ) -> tuple[list[ConceptCandidate], SetupTransition | None, list[ObservableFact]]:
+    ) -> tuple[
+        list[ConceptCandidate],
+        SetupTransition | None,
+        list[ObservableFact],
+    ]:
         raid_candidate = self.candidate_store.get_view(
             str(setup.metrics["raid_candidate_id"])
         )
@@ -1384,9 +1429,8 @@ class M3SetupPipeline:
                         )
                     )
         if zones:
-            transition = self._append_transition(
+            link = self._append_evidence_link(
                 setup,
-                SetupStatus.FORMING,
                 bar.open_time,
                 bar.close_time,
                 evidence_candidate_ids=list(
@@ -1414,7 +1458,7 @@ class M3SetupPipeline:
                     ],
                 },
             )
-            return zones, transition, []
+            return zones, link, []
 
         if setup.entry_zone_candidate_ids:
             return [], None, []
@@ -1448,7 +1492,11 @@ class M3SetupPipeline:
         setup: SetupCandidate,
         shift_candidates: Sequence[ConceptCandidate],
         shift_bar: OHLCBar,
-    ) -> tuple[list[ConceptCandidate], SetupTransition | None, list[ObservableFact]]:
+    ) -> tuple[
+        list[ConceptCandidate],
+        SetupTransition | SetupEvidenceLink | None,
+        list[ObservableFact],
+    ]:
         shifts = [
             item
             for item in shift_candidates
@@ -1600,9 +1648,8 @@ class M3SetupPipeline:
                     )
         if not zones:
             return [], None, research
-        transition = self._append_transition(
+        link = self._append_evidence_link(
             setup,
-            SetupStatus.FORMING,
             shift_bar.open_time,
             shift_bar.close_time,
             evidence_candidate_ids=list(
@@ -1622,7 +1669,7 @@ class M3SetupPipeline:
                 "fvg_temporal_relation": "inside_shift_bar",
             },
         )
-        return zones, transition, research
+        return zones, link, research
 
     def _fvg_path_until(
         self,
@@ -1974,6 +2021,40 @@ class M3SetupPipeline:
         self.setup_store.append_transition(transition)
         return transition
 
+    def _append_evidence_link(
+        self,
+        setup: SetupCandidate,
+        occurred_at: AwareDatetime,
+        available_at: AwareDatetime,
+        *,
+        evidence_candidate_ids: Sequence[str] = (),
+        evidence_fact_ids: Sequence[str] = (),
+        entry_zone_candidate_ids: Sequence[str] = (),
+        reason_codes: Sequence[str],
+        metrics: Mapping[str, Any] | None = None,
+    ) -> SetupEvidenceLink:
+        link = SetupEvidenceLink(
+            evidence_link_id=_event_id(
+                "setup-evidence",
+                setup.setup_candidate_id,
+                available_at.isoformat(),
+                ",".join(reason_codes),
+                ",".join(evidence_candidate_ids),
+                ",".join(evidence_fact_ids),
+                ",".join(entry_zone_candidate_ids),
+            ),
+            setup_candidate_id=setup.setup_candidate_id,
+            occurred_at=occurred_at,
+            available_at=available_at,
+            evidence_candidate_ids=list(evidence_candidate_ids),
+            evidence_fact_ids=list(evidence_fact_ids),
+            entry_zone_candidate_ids=list(entry_zone_candidate_ids),
+            reason_codes=list(reason_codes),
+            metrics=dict(metrics or {}),
+        )
+        self.setup_store.append_evidence_link(link)
+        return link
+
     def _research_observation(
         self,
         setup: SetupCandidate,
@@ -1997,9 +2078,10 @@ class M3SetupPipeline:
             occurred_at=bar.open_time,
             confirmed_at=bar.close_time,
             available_at=bar.close_time,
-            source_fact_ids=list(
-                dict.fromkeys([*setup.evidence_fact_ids, *self._bar_fact_ids(bar)])
-            ),
+            # The setup ID is the durable join key. Repeating the setup's full,
+            # ever-growing evidence history on every research row made audit
+            # payload size quadratic without adding causal information.
+            source_fact_ids=self._bar_fact_ids(bar),
             metrics={
                 "setup_candidate_id": setup.setup_candidate_id,
                 "candidate_ids": list(candidate_ids),
@@ -2193,11 +2275,11 @@ class M3SetupPipeline:
     def _bar_fact_ids(self, bar: OHLCBar) -> list[str]:
         return [
             fact.fact_id
-            for fact in self.fact_store.visible_views(
-                as_of=bar.close_time,
+            for fact in self.fact_store.available_views(
+                at=bar.close_time,
                 symbol=bar.symbol,
                 timeframe=bar.timeframe,
-                fact_type=FactType.CANDLE_FEATURES,
+                fact_types={FactType.CANDLE_FEATURES},
             )
             if fact.occurred_at == bar.open_time
         ]
@@ -2224,7 +2306,16 @@ class M3SetupPipeline:
         ids = [fact.fact_id for fact in facts]
         if len(ids) != len(set(ids)) or self.fact_store.existing_ids(ids):
             raise DuplicateRecordError("M3 attempted to append duplicate facts")
-        self.fact_store.extend(facts)
+        retained = (
+            facts
+            if self.retain_research_facts
+            else [
+                fact
+                for fact in facts
+                if fact.fact_type != FactType.RESEARCH_OBSERVATION
+            ]
+        )
+        self.fact_store.extend(retained)
 
     def _append_candidates(self, candidates: Sequence[ConceptCandidate]) -> None:
         ids = [candidate.candidate_id for candidate in candidates]

@@ -49,6 +49,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--analysis-end", type=datetime.fromisoformat, default=DEFAULT_ANALYSIS_END
     )
+    parser.add_argument(
+        "--debug-steps",
+        action="store_true",
+        help="Retain per-close replay steps; disabled by default for research runs",
+    )
     return parser.parse_args()
 
 
@@ -99,8 +104,13 @@ def main() -> None:
         if args.reuse_raw
         else analysis_end.date()
     )
+    calendar_start = (
+        min(replay_start.date(), DEFAULT_REPLAY_START.date())
+        if args.reuse_raw
+        else replay_start.date()
+    )
     calendar = ExnessXauCalendarPreset().build(
-        start_date=replay_start.date(),
+        start_date=calendar_start,
         end_date=calendar_end,
         exceptional_closures=_exceptional_closures(),
     )
@@ -145,12 +155,14 @@ def main() -> None:
                 strict=True,
                 closure_calendar=calendar,
             ).load(source)
-            datasets.append(dataset)
             print(
                 f"validated {timeframe.value}: bars={len(dataset.records)} "
                 f"gaps={len(dataset.quality.gaps)} "
                 f"unexplained={dataset.quality.unexplained_gap_count}",
                 flush=True,
+            )
+            datasets.append(
+                dataset.window(start_at=replay_start, end_at=analysis_end)
             )
     else:
         load_env_file(args.env_file)
@@ -177,12 +189,14 @@ def main() -> None:
                     closure_calendar=calendar,
                     raw_output_path=raw / f"{symbol}_{timeframe.value}.tsv",
                 )
-                datasets.append(dataset)
                 print(
                     f"validated {timeframe.value}: bars={len(dataset.records)} "
                     f"gaps={len(dataset.quality.gaps)} "
                     f"unexplained={dataset.quality.unexplained_gap_count}",
                     flush=True,
+                )
+                datasets.append(
+                    dataset.window(start_at=replay_start, end_at=analysis_end)
                 )
         finally:
             client.close()
@@ -213,6 +227,7 @@ def main() -> None:
             "candle_timezone": "UTC",
             "session_policy": "pending_review_no_session_labels",
         },
+        retain_research_facts=False,
     )
     window = M4StudyWindow(
         replay_start=replay_start,
@@ -238,6 +253,7 @@ def main() -> None:
         datasets,
         study_window=window,
         progress_callback=report_progress,
+        retain_steps=args.debug_steps,
     )
     replay_paths = replay.export_jsonl(output / "replay")
     all_bars = [record.bar for dataset in datasets for record in dataset.records]

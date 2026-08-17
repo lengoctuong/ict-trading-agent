@@ -134,6 +134,14 @@ def test_exness_mt5_loader_preserves_utc_spread_and_reports_quality() -> None:
     assert dataset.records[0].bar.close_time == T0 + timedelta(minutes=5)
     assert dataset.records[0].spread_points == 25.0
     assert dataset.records[0].source_metrics == {"bid_source": "bid"}
+    windowed = dataset.window(
+        start_at=T0 + timedelta(minutes=5),
+        end_at=T0 + timedelta(minutes=15),
+    )
+    assert len(windowed.records) == 2
+    assert windowed.source_rows == 3
+    assert windowed.quality == dataset.quality
+    assert windowed.content_sha256 == dataset.content_sha256
 
 
 def test_exness_loader_rejects_duplicates_and_can_report_gaps_permissively() -> None:
@@ -268,6 +276,69 @@ def test_m4_replay_keeps_late_reclaim_as_near_miss() -> None:
     assert late[0].threshold_bars == 3
     assert late[0].excess_bars == 1
     assert result.summary.near_misses_by_reason["RECLAIM_OUTSIDE_WINDOW"] == 1
+
+
+def test_compact_research_mode_preserves_core_semantics_and_summary() -> None:
+    bars = ready_bars()
+
+    def replay(*, compact: bool):
+        engine = M4ReplayEngine(
+            symbol="XAUUSD",
+            **engine_identity(),
+            initial_facts=[
+                reference(
+                    "pdl-100",
+                    FactType.PREVIOUS_DAY_LEVEL,
+                    Timeframe.D1,
+                    "low",
+                    100.0,
+                ),
+                reference(
+                    "m5-high-104",
+                    FactType.SWING_POINT,
+                    Timeframe.M5,
+                    "high",
+                    104.0,
+                ),
+            ],
+            candle_config=CandleFeatureConfig(baseline_period=3),
+            m3_policy=M3Policy(setup_timeframes=(Timeframe.M5,)),
+            retain_research_facts=not compact,
+        )
+        return engine.run(
+            [record(item, index + 2) for index, item in enumerate(bars)],
+            study_window=study(),
+            retain_steps=not compact,
+        )
+
+    full = replay(compact=False)
+    compact = replay(compact=True)
+    core_kinds = {
+        M4EventKind.CANDIDATE,
+        M4EventKind.RAID_EPISODE,
+        M4EventKind.RAID_UPDATE,
+        M4EventKind.SETUP,
+        M4EventKind.SETUP_EVIDENCE,
+        M4EventKind.TRANSITION,
+        M4EventKind.READY_PAYLOAD,
+    }
+    assert {
+        (item.kind, item.category, item.record_id, item.available_at)
+        for item in full.events
+        if item.kind in core_kinds
+    } == {
+        (item.kind, item.category, item.record_id, item.available_at)
+        for item in compact.events
+        if item.kind in core_kinds
+    }
+    assert full.summary == compact.summary
+    assert {
+        (item.reason_code, item.setup_candidate_id, item.available_at)
+        for item in full.near_misses
+    } == {
+        (item.reason_code, item.setup_candidate_id, item.available_at)
+        for item in compact.near_misses
+    }
 
 
 def test_m4_replay_audits_expiry_and_late_shift_without_reopening_setup() -> None:

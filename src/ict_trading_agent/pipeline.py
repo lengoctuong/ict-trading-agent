@@ -159,51 +159,42 @@ class M2PrimitivePipeline:
         if displacement is not None:
             candidates.append(displacement)
 
-        visible_at_open = self.fact_store.visible_views(
+        visible_at_open = (
+            self.fact_store.visible_views(
+                as_of=bar.open_time,
+                symbol=bar.symbol,
+                fact_types={FactType.SWING_POINT, FactType.SWING_PROMOTION},
+            )
+            if not self.swing_hierarchy.initialized
+            else ()
+        )
+        hierarchy_input = (
+            [*visible_at_open, *facts]
+            if not self.swing_hierarchy.initialized
+            else facts
+        )
+        facts.extend(self.swing_hierarchy.detect(hierarchy_input))
+        liquidity_references = self.fact_store.active_liquidity_reference_views_for_bar(
+            symbol=bar.symbol,
+            low=bar.low,
+            high=bar.high,
             as_of=bar.open_time,
-            symbol=bar.symbol,
-            fact_types={
-                FactType.SWING_POINT,
-                FactType.SWING_PROMOTION,
-                FactType.SESSION_LEVEL,
-                FactType.PREVIOUS_DAY_LEVEL,
-                FactType.STRUCTURE_STATE,
-            },
+            reuse_taken=self.reference_lifecycle.policy.reuse_taken_levels,
         )
-        facts.extend(self.swing_hierarchy.detect([*visible_at_open, *facts]))
-        reference_facts = [
-            fact
-            for fact in visible_at_open
-            if fact.fact_type
-            in {
-                FactType.SWING_POINT,
-                FactType.SESSION_LEVEL,
-                FactType.PREVIOUS_DAY_LEVEL,
-            }
-        ]
-        liquidity_lifecycle_at_close = self.fact_store.visible_views(
-            as_of=bar.close_time,
+        structure_references = self.fact_store.active_structure_reference_views_for_close(
             symbol=bar.symbol,
-            fact_types={FactType.LEVEL_BREACH, FactType.REFERENCE_STATE},
+            close=bar.close,
+            as_of=bar.open_time,
         )
-        taken_reference_ids = {
-            str(fact.metrics["reference_fact_id"])
-            for fact in liquidity_lifecycle_at_close
-            if fact.metrics.get("reference_fact_id") is not None
-        }
-        inactive_structure_ids = {
-            str(fact.metrics["reference_fact_id"])
-            for fact in visible_at_open
-            if fact.fact_type == FactType.STRUCTURE_STATE
-            and fact.metrics.get("reference_fact_id") is not None
-        }
+        liquidity_ids = {fact.fact_id for fact in liquidity_references}
+        structure_ids = {fact.fact_id for fact in structure_references}
+        reference_facts = sorted(
+            {fact.fact_id: fact for fact in [*liquidity_references, *structure_references]}.values(),
+            key=lambda item: (item.available_at, item.fact_id),
+        )
         for reference_fact in reference_facts:
             reference = ReferenceLevel.from_fact(reference_fact)
-            liquidity_eligible = (
-                self.reference_lifecycle.policy.reuse_taken_levels
-                or reference.reference_fact_id not in taken_reference_ids
-            )
-            if liquidity_eligible:
+            if reference.reference_fact_id in liquidity_ids:
                 interactions = self.level_interactions.detect(bar, reference)
                 facts.extend(interactions)
                 if interactions:
@@ -222,21 +213,32 @@ class M2PrimitivePipeline:
                     )
             if (
                 reference.fact_type == FactType.SWING_POINT
-                and reference.reference_fact_id not in inactive_structure_ids
+                and reference.reference_fact_id in structure_ids
             ):
                 price_break = self.price_breaks.detect(bar, reference)
                 if price_break is not None:
-                    rank = effective_swing_rank(
+                    rank = self.fact_store.effective_swing_rank_view(
                         reference.reference_fact_id,
-                        [*visible_at_open, *facts],
                         as_of=price_break.available_at,
                     )
+                    batch_rank = effective_swing_rank(
+                        reference.reference_fact_id,
+                        facts,
+                        as_of=price_break.available_at,
+                    )
+                    rank_order = {
+                        "short_term": 0,
+                        "intermediate": 1,
+                        "long_term": 2,
+                    }
+                    if rank_order[batch_rank.value] > rank_order[rank.value]:
+                        rank = batch_rank
                     price_break = price_break.model_copy(
                         update={
                             "metrics": price_break.metrics
                             | {"effective_rank_as_of_break": rank.value}
                         },
-                        deep=True,
+                        deep=False,
                     )
                     facts.append(price_break)
                     candidates.append(self.structure_breaks.detect(price_break))

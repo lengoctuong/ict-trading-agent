@@ -201,6 +201,7 @@ def test_setup_lifecycle_matches_frozen_flow() -> None:
     assert can_transition_setup(SetupStatus.READY_FOR_LLM, SetupStatus.ACCEPTED)
     assert can_transition_setup(SetupStatus.ACCEPTED, SetupStatus.RISK_REJECTED)
     assert can_transition_setup(SetupStatus.ENTERED, SetupStatus.CLOSED)
+    assert not can_transition_setup(SetupStatus.DETECTED, SetupStatus.DETECTED)
     with pytest.raises(ValueError, match="invalid setup transition"):
         assert_setup_transition(SetupStatus.DETECTED, SetupStatus.ENTERED)
 

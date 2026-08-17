@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict
 from collections.abc import Iterable
 
@@ -11,13 +12,21 @@ from .candidates import (
     RaidEpisodeUpdate,
     SetupCandidate,
 )
-from .enums import CandidateType, FactType, Timeframe
+from .enums import CandidateType, FactType, SetupStatus, SwingRank, Timeframe
 from .facts import ObservableFact
-from .lifecycle import SetupTransition, assert_setup_transition
+from .lifecycle import SetupEvidenceLink, SetupTransition, assert_setup_transition
 
 
 class DuplicateRecordError(ValueError):
     pass
+
+
+def candidate_rank(rank: SwingRank) -> int:
+    return {
+        SwingRank.SHORT_TERM: 0,
+        SwingRank.INTERMEDIATE: 1,
+        SwingRank.LONG_TERM: 2,
+    }[rank]
 
 
 class FactStore:
@@ -29,15 +38,58 @@ class FactStore:
         self._by_timeframe: dict[Timeframe | None, list[str]] = defaultdict(list)
         self._by_fact_type: dict[FactType, list[str]] = defaultdict(list)
         self._by_available_at: dict[AwareDatetime, list[str]] = defaultdict(list)
+        self._reference_prices: dict[
+            tuple[str, str], list[tuple[float, str]]
+        ] = defaultdict(list)
+        self._liquidity_taken_at: dict[str, AwareDatetime] = {}
+        self._structure_inactive_at: dict[str, AwareDatetime] = {}
+        self._swing_ranks: dict[
+            str, list[tuple[AwareDatetime, SwingRank]]
+        ] = defaultdict(list)
 
     def append(self, fact: ObservableFact) -> None:
         if fact.fact_id in self._records:
             raise DuplicateRecordError(f"duplicate fact_id: {fact.fact_id}")
-        self._records[fact.fact_id] = fact.model_copy(deep=True)
+        # Records are append-only and the hot path already owns freshly
+        # validated models. A shallow snapshot avoids recursively copying
+        # growing evidence lists for every research observation.
+        self._records[fact.fact_id] = fact.model_copy(deep=False)
         self._by_symbol[fact.symbol].append(fact.fact_id)
         self._by_timeframe[fact.timeframe].append(fact.fact_id)
         self._by_fact_type[fact.fact_type].append(fact.fact_id)
         self._by_available_at[fact.available_at].append(fact.fact_id)
+        if fact.fact_type in {
+            FactType.SWING_POINT,
+            FactType.SESSION_LEVEL,
+            FactType.PREVIOUS_DAY_LEVEL,
+        }:
+            if fact.geometry is not None and fact.geometry.price is not None:
+                side = str(fact.metrics.get("side"))
+                if side in {"high", "low"}:
+                    insort(
+                        self._reference_prices[(fact.symbol, side)],
+                        (float(fact.geometry.price), fact.fact_id),
+                    )
+            if fact.fact_type == FactType.SWING_POINT:
+                rank = SwingRank(
+                    str(fact.metrics.get("rank", SwingRank.SHORT_TERM.value))
+                )
+                self._swing_ranks[fact.fact_id].append((fact.available_at, rank))
+        reference_id = fact.metrics.get("reference_fact_id")
+        if reference_id is not None and fact.fact_type in {
+            FactType.LEVEL_BREACH,
+            FactType.REFERENCE_STATE,
+        }:
+            self._liquidity_taken_at.setdefault(str(reference_id), fact.available_at)
+        if reference_id is not None and fact.fact_type == FactType.STRUCTURE_STATE:
+            self._structure_inactive_at.setdefault(
+                str(reference_id), fact.available_at
+            )
+        if fact.fact_type == FactType.SWING_PROMOTION:
+            promoted_id = fact.metrics.get("promoted_swing_fact_id")
+            if promoted_id is not None:
+                rank = SwingRank(str(fact.metrics["rank"]))
+                self._swing_ranks[str(promoted_id)].append((fact.available_at, rank))
 
     def extend(self, facts: Iterable[ObservableFact]) -> None:
         for fact in facts:
@@ -174,6 +226,113 @@ class FactStore:
         )
         return tuple(sorted(records, key=lambda item: item.fact_id))
 
+    def reference_views_in_range(
+        self,
+        *,
+        symbol: str,
+        low: float,
+        high: float,
+        as_of: AwareDatetime,
+    ) -> tuple[ObservableFact, ...]:
+        """Return cross-timeframe reference views priced inside [low, high]."""
+
+        if low > high:
+            raise ValueError("reference range low cannot exceed high")
+        ids: set[str] = set()
+        for side in ("high", "low"):
+            entries = self._reference_prices.get((symbol, side), [])
+            start = bisect_left(entries, (low, ""))
+            stop = bisect_right(entries, (high, chr(0x10FFFF)))
+            ids.update(fact_id for _, fact_id in entries[start:stop])
+        return tuple(
+            sorted(
+                (
+                    self._records[fact_id]
+                    for fact_id in ids
+                    if self._records[fact_id].available_at <= as_of
+                ),
+                key=lambda item: (item.available_at, item.fact_id),
+            )
+        )
+
+    def active_liquidity_reference_views_for_bar(
+        self,
+        *,
+        symbol: str,
+        low: float,
+        high: float,
+        as_of: AwareDatetime,
+        reuse_taken: bool = False,
+    ) -> tuple[ObservableFact, ...]:
+        """Return active levels that this bar can strictly breach."""
+
+        ids: set[str] = set()
+        highs = self._reference_prices.get((symbol, "high"), [])
+        high_stop = bisect_left(highs, (high, ""))
+        ids.update(fact_id for _, fact_id in highs[:high_stop])
+        lows = self._reference_prices.get((symbol, "low"), [])
+        low_start = bisect_right(lows, (low, chr(0x10FFFF)))
+        ids.update(fact_id for _, fact_id in lows[low_start:])
+        return tuple(
+            sorted(
+                (
+                    self._records[fact_id]
+                    for fact_id in ids
+                    if self._records[fact_id].available_at <= as_of
+                    and (
+                        reuse_taken
+                        or self._liquidity_taken_at.get(fact_id, as_of) > as_of
+                        or fact_id not in self._liquidity_taken_at
+                    )
+                ),
+                key=lambda item: (item.available_at, item.fact_id),
+            )
+        )
+
+    def active_structure_reference_views_for_close(
+        self,
+        *,
+        symbol: str,
+        close: float,
+        as_of: AwareDatetime,
+    ) -> tuple[ObservableFact, ...]:
+        """Return active swing references that this close can break."""
+
+        ids: set[str] = set()
+        highs = self._reference_prices.get((symbol, "high"), [])
+        high_stop = bisect_left(highs, (close, ""))
+        ids.update(fact_id for _, fact_id in highs[:high_stop])
+        lows = self._reference_prices.get((symbol, "low"), [])
+        low_start = bisect_right(lows, (close, chr(0x10FFFF)))
+        ids.update(fact_id for _, fact_id in lows[low_start:])
+        return tuple(
+            sorted(
+                (
+                    self._records[fact_id]
+                    for fact_id in ids
+                    if self._records[fact_id].fact_type == FactType.SWING_POINT
+                    and self._records[fact_id].available_at <= as_of
+                    and (
+                        self._structure_inactive_at.get(fact_id, as_of) > as_of
+                        or fact_id not in self._structure_inactive_at
+                    )
+                ),
+                key=lambda item: (item.available_at, item.fact_id),
+            )
+        )
+
+    def effective_swing_rank_view(
+        self,
+        reference_fact_id: str,
+        *,
+        as_of: AwareDatetime,
+    ) -> SwingRank:
+        rank = SwingRank.SHORT_TERM
+        for available_at, candidate in self._swing_ranks.get(reference_fact_id, []):
+            if available_at <= as_of and candidate_rank(candidate) > candidate_rank(rank):
+                rank = candidate
+        return rank
+
     def as_mapping(self) -> dict[str, ObservableFact]:
         return {
             key: value.model_copy(deep=True) for key, value in self._records.items()
@@ -194,7 +353,7 @@ class CandidateStore:
             raise DuplicateRecordError(
                 f"duplicate candidate_id: {candidate.candidate_id}"
             )
-        self._records[candidate.candidate_id] = candidate.model_copy(deep=True)
+        self._records[candidate.candidate_id] = candidate.model_copy(deep=False)
         self._by_symbol[candidate.symbol].append(candidate.candidate_id)
         self._by_timeframe[candidate.timeframe].append(candidate.candidate_id)
         self._by_candidate_type[candidate.candidate_type].append(
@@ -431,6 +590,7 @@ class RaidEpisodeStore:
         timeframes = list(episode.observed_timeframes)
         states = dict(episode.observation_states)
         breached_at = dict(episode.breached_at)
+        observation_extremes = dict(episode.observation_extremes)
         first_raid_candidate_id = episode.first_raid_candidate_id
         observation_ids.append(update.observation_fact_id)
         timeframes.append(update.observation_timeframe)
@@ -441,6 +601,17 @@ class RaidEpisodeStore:
         states[update.observation_timeframe] = update.observation_state
         if update.breached_at is not None:
             breached_at.setdefault(update.observation_timeframe, update.breached_at)
+        prior_extreme = observation_extremes.get(update.observation_timeframe)
+        if prior_extreme is None:
+            observation_extremes[update.observation_timeframe] = update.extreme
+        elif episode.direction.value == "bullish":
+            observation_extremes[update.observation_timeframe] = min(
+                prior_extreme, update.extreme
+            )
+        else:
+            observation_extremes[update.observation_timeframe] = max(
+                prior_extreme, update.extreme
+            )
         extreme = (
             min(episode.extreme, update.extreme)
             if episode.direction.value == "bullish"
@@ -455,6 +626,7 @@ class RaidEpisodeStore:
                 "observed_timeframes": list(dict.fromkeys(timeframes)),
                 "observation_states": states,
                 "breached_at": breached_at,
+                "observation_extremes": observation_extremes,
                 "extreme": extreme,
             },
             deep=False,
@@ -547,14 +719,22 @@ class RaidEpisodeStore:
 
 
 class SetupStore:
-    """Append-only setup origins and transition events with reconstructed views."""
+    """Append-only setup origins, transitions, and evidence links."""
 
     def __init__(self) -> None:
         self._setups: dict[str, SetupCandidate] = {}
         self._transitions: dict[str, SetupTransition] = {}
         self._transitions_by_setup: dict[str, list[SetupTransition]] = defaultdict(list)
+        self._evidence_links: dict[str, SetupEvidenceLink] = {}
+        self._evidence_by_setup: dict[str, list[SetupEvidenceLink]] = defaultdict(list)
+        self._events_by_setup: dict[
+            str, list[SetupTransition | SetupEvidenceLink]
+        ] = defaultdict(list)
+        self._last_event_available_at: dict[str, AwareDatetime] = {}
         self._current: dict[str, SetupCandidate] = {}
         self._by_raid_episode: dict[str, list[str]] = defaultdict(list)
+        self._scheduled_by_timeframe: dict[Timeframe, set[str]] = defaultdict(set)
+        self._retired_by_timeframe: dict[Timeframe, set[str]] = defaultdict(set)
         self._processed_bars: set[tuple[Timeframe, AwareDatetime]] = set()
 
     def append_setup(self, setup: SetupCandidate) -> None:
@@ -570,6 +750,7 @@ class SetupStore:
             self._by_raid_episode[str(raid_episode_id)].append(
                 stored.setup_candidate_id
             )
+        self._reschedule(stored)
 
     def append_transition(self, transition: SetupTransition) -> None:
         if transition.transition_id in self._transitions:
@@ -582,12 +763,40 @@ class SetupStore:
                 "transition.from_status does not match current setup state"
             )
         assert_setup_transition(current.status, transition.to_status)
-        if transition.available_at < current.available_at:
+        last_event_at = self._last_event_available_at.get(
+            transition.setup_candidate_id, current.available_at
+        )
+        if transition.available_at < last_event_at:
             raise ValueError("setup transitions must be appended in availability order")
         stored = transition.model_copy(deep=True)
         self._transitions[transition.transition_id] = stored
         self._transitions_by_setup[transition.setup_candidate_id].append(stored)
+        self._events_by_setup[transition.setup_candidate_id].append(stored)
+        self._last_event_available_at[transition.setup_candidate_id] = (
+            transition.available_at
+        )
         self._current[transition.setup_candidate_id] = self._apply_transition(
+            current, stored
+        )
+        self._reschedule(self._current[transition.setup_candidate_id])
+
+    def append_evidence_link(self, link: SetupEvidenceLink) -> None:
+        if link.evidence_link_id in self._evidence_links:
+            raise DuplicateRecordError(
+                f"duplicate evidence_link_id: {link.evidence_link_id}"
+            )
+        current = self._current[link.setup_candidate_id]
+        last_event_at = self._last_event_available_at.get(
+            link.setup_candidate_id, current.available_at
+        )
+        if link.available_at < last_event_at:
+            raise ValueError("setup evidence must be appended in availability order")
+        stored = link.model_copy(deep=True)
+        self._evidence_links[link.evidence_link_id] = stored
+        self._evidence_by_setup[link.setup_candidate_id].append(stored)
+        self._events_by_setup[link.setup_candidate_id].append(stored)
+        self._last_event_available_at[link.setup_candidate_id] = link.available_at
+        self._current[link.setup_candidate_id] = self._apply_evidence_link(
             current, stored
         )
 
@@ -600,6 +809,14 @@ class SetupStore:
             for item in self._transitions_by_setup.get(setup_candidate_id, [])
         )
 
+    def evidence_links(
+        self, setup_candidate_id: str
+    ) -> tuple[SetupEvidenceLink, ...]:
+        return tuple(
+            item.model_copy(deep=True)
+            for item in self._evidence_by_setup.get(setup_candidate_id, [])
+        )
+
     def current(
         self,
         setup_candidate_id: str,
@@ -607,13 +824,50 @@ class SetupStore:
         as_of: AwareDatetime | None = None,
     ) -> SetupCandidate:
         latest = self._current[setup_candidate_id]
-        if as_of is None or latest.available_at <= as_of:
+        last_event_at = self._last_event_available_at.get(
+            setup_candidate_id, latest.available_at
+        )
+        if as_of is None or last_event_at <= as_of:
             return latest.model_copy(deep=True)
         setup = self.get_origin(setup_candidate_id)
-        for transition in self._transitions_by_setup.get(setup_candidate_id, []):
-            if transition.available_at <= as_of:
-                setup = self._apply_transition(setup, transition)
+        for event in self._events_by_setup.get(setup_candidate_id, []):
+            if event.available_at > as_of:
+                continue
+            if isinstance(event, SetupTransition):
+                setup = self._apply_transition(setup, event)
+            else:
+                setup = self._apply_evidence_link(setup, event)
         return setup
+
+    @staticmethod
+    def _apply_evidence_link(
+        setup: SetupCandidate,
+        link: SetupEvidenceLink,
+    ) -> SetupCandidate:
+        metrics = dict(setup.metrics)
+        metrics.update(link.metrics)
+        return setup.model_copy(
+            update={
+                "evidence_candidate_ids": list(
+                    dict.fromkeys(
+                        [*setup.evidence_candidate_ids, *link.evidence_candidate_ids]
+                    )
+                ),
+                "evidence_fact_ids": list(
+                    dict.fromkeys([*setup.evidence_fact_ids, *link.evidence_fact_ids])
+                ),
+                "entry_zone_candidate_ids": list(
+                    dict.fromkeys(
+                        [
+                            *setup.entry_zone_candidate_ids,
+                            *link.entry_zone_candidate_ids,
+                        ]
+                    )
+                ),
+                "metrics": metrics,
+            },
+            deep=False,
+        )
 
     @staticmethod
     def _apply_transition(
@@ -657,7 +911,10 @@ class SetupStore:
         as_of: AwareDatetime | None = None,
     ) -> SetupCandidate:
         latest = self._current[setup_candidate_id]
-        if as_of is None or latest.available_at <= as_of:
+        last_event_at = self._last_event_available_at.get(
+            setup_candidate_id, latest.available_at
+        )
+        if as_of is None or last_event_at <= as_of:
             return latest
         return self.current(setup_candidate_id, as_of=as_of)
 
@@ -728,6 +985,57 @@ class SetupStore:
             for setup in setups
             if setup.created_at <= as_of and setup.available_at <= as_of
         )
+
+    def scheduled_views(
+        self,
+        *,
+        timeframe: Timeframe,
+        as_of: AwareDatetime,
+        symbol: str | None = None,
+    ) -> tuple[SetupCandidate, ...]:
+        """Return setups woken by one timeframe-specific scheduler lane."""
+
+        retired = self._retired_by_timeframe.get(timeframe, set())
+        setups = (
+            self.current_view(setup_id, as_of=as_of)
+            for setup_id in self._scheduled_by_timeframe.get(timeframe, set())
+            if setup_id not in retired
+            and (symbol is None or self._setups[setup_id].symbol == symbol)
+        )
+        return tuple(
+            sorted(
+                (
+                    setup
+                    for setup in setups
+                    if setup.created_at <= as_of and setup.available_at <= as_of
+                ),
+                key=lambda item: (item.created_at, item.setup_candidate_id),
+            )
+        )
+
+    def retire_schedule_lane(
+        self,
+        setup_candidate_id: str,
+        timeframe: Timeframe,
+    ) -> None:
+        self._retired_by_timeframe[timeframe].add(setup_candidate_id)
+
+    def _reschedule(self, setup: SetupCandidate) -> None:
+        setup_id = setup.setup_candidate_id
+        for ids in self._scheduled_by_timeframe.values():
+            ids.discard(setup_id)
+        for ids in self._retired_by_timeframe.values():
+            ids.discard(setup_id)
+        if setup.status == SetupStatus.DETECTED:
+            relevant = {setup.setup_timeframe}
+        elif setup.status == SetupStatus.FORMING:
+            relevant = {setup.setup_timeframe, setup.entry_timeframe}
+        elif setup.status in {SetupStatus.READY_FOR_LLM, SetupStatus.ACCEPTED}:
+            relevant = {setup.setup_timeframe}
+        else:
+            relevant = {setup.setup_timeframe, setup.entry_timeframe}
+        for timeframe in relevant:
+            self._scheduled_by_timeframe[timeframe].add(setup_id)
 
     def as_mappings(
         self,

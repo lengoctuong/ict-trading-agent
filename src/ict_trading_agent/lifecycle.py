@@ -40,7 +40,7 @@ ALLOWED_SETUP_TRANSITIONS: dict[SetupStatus, frozenset[SetupStatus]] = {
 
 
 def can_transition_setup(current: SetupStatus, target: SetupStatus) -> bool:
-    return current == target or target in ALLOWED_SETUP_TRANSITIONS[current]
+    return target in ALLOWED_SETUP_TRANSITIONS[current]
 
 
 def assert_setup_transition(current: SetupStatus, target: SetupStatus) -> None:
@@ -49,7 +49,7 @@ def assert_setup_transition(current: SetupStatus, target: SetupStatus) -> None:
 
 
 class SetupTransition(SchemaModel):
-    """Immutable evidence-bearing transition in a setup episode."""
+    """Immutable lifecycle status change in a setup episode."""
 
     transition_id: NonEmptyStr
     setup_candidate_id: NonEmptyStr
@@ -73,4 +73,31 @@ class SetupTransition(SchemaModel):
             assert_setup_transition(self.from_status, self.to_status)
         if self.expires_at is not None and self.expires_at <= self.available_at:
             raise ValueError("transition expiry must follow availability")
+        return self
+
+
+class SetupEvidenceLink(SchemaModel):
+    """Append-only evidence merged into a setup without changing its status."""
+
+    evidence_link_id: NonEmptyStr
+    setup_candidate_id: NonEmptyStr
+    occurred_at: AwareDatetime
+    available_at: AwareDatetime
+    evidence_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
+    evidence_fact_ids: list[NonEmptyStr] = Field(default_factory=list)
+    entry_zone_candidate_ids: list[NonEmptyStr] = Field(default_factory=list)
+    reason_codes: list[NonEmptyStr] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_evidence_link(self) -> "SetupEvidenceLink":
+        if self.available_at < self.occurred_at:
+            raise ValueError("evidence availability cannot precede occurrence")
+        if not (
+            self.evidence_candidate_ids
+            or self.evidence_fact_ids
+            or self.entry_zone_candidate_ids
+            or self.metrics
+        ):
+            raise ValueError("an evidence link cannot be empty")
         return self
