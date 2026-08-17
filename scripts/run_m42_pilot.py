@@ -8,12 +8,13 @@ from pathlib import Path
 
 from ict_trading_agent.detectors import CandleFeatureConfig
 from ict_trading_agent.enums import Timeframe
-from ict_trading_agent.m4 import M4ReplayEngine
+from ict_trading_agent.m4 import ExnessCsvLoader, M4ReplayEngine
 from ict_trading_agent.m4_support import (
     CausalReferenceBuilder,
     CausalReferencePolicy,
     ExnessXauCalendarPreset,
     M4StudyWindow,
+    M4SymbolMetadata,
 )
 from ict_trading_agent.m42 import M42ResearchAnalyzer
 from ict_trading_agent.market import MarketClosure, MarketSequenceAdjacencyPolicy
@@ -33,6 +34,12 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the first M4.2 Exness XAU pilot")
     parser.add_argument("--env-file", default=".env.mt5.local")
     parser.add_argument("--output", default="artifacts/m42-pilot-2026-06-01_2026-08-16")
+    parser.add_argument("--symbol", default="XAUUSDm")
+    parser.add_argument(
+        "--reuse-raw",
+        action="store_true",
+        help="Validate and replay existing raw TSV files without opening MT5",
+    )
     parser.add_argument(
         "--replay-start", type=datetime.fromisoformat, default=DEFAULT_REPLAY_START
     )
@@ -86,8 +93,7 @@ def main() -> None:
     analysis_start = _aware_utc(args.analysis_start)
     analysis_end = _aware_utc(args.analysis_end)
     output = Path(args.output)
-    load_env_file(args.env_file)
-    config = MT5ConnectionConfig.from_environment()
+    symbol = args.symbol
     calendar = ExnessXauCalendarPreset().build(
         start_date=replay_start.date(),
         end_date=analysis_end.date(),
@@ -105,30 +111,35 @@ def main() -> None:
             ),
         }
     )
-    client = MT5HistoryClient(config)
-    client.connect()
-    try:
-        captured_at = datetime.now(UTC)
-        metadata = client.symbol_metadata(captured_at=captured_at)
-        datasets = []
-        raw = output / "raw"
-        for timeframe in (
-            Timeframe.M5,
-            Timeframe.M15,
-            Timeframe.H1,
-            Timeframe.H4,
-            Timeframe.D1,
-        ):
-            print(f"fetching {timeframe.value}", flush=True)
-            dataset = client.fetch_dataset(
-                MT5HistoryRequest(
-                    timeframe=timeframe,
-                    start_at=replay_start,
-                    end_at=analysis_end,
-                ),
-                closure_calendar=calendar,
-                raw_output_path=raw / f"{config.symbol}_{timeframe.value}.tsv",
+    datasets = []
+    raw = output / "raw"
+    timeframes = (
+        Timeframe.M5,
+        Timeframe.M15,
+        Timeframe.H1,
+        Timeframe.H4,
+        Timeframe.D1,
+    )
+    metadata_path = raw / "symbol_metadata.json"
+    if args.reuse_raw:
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"cached replay requires metadata snapshot: {metadata_path}"
             )
+        metadata = M4SymbolMetadata.model_validate_json(
+            metadata_path.read_text(encoding="utf-8")
+        )
+        if metadata.symbol != symbol:
+            raise ValueError("cached metadata symbol does not match --symbol")
+        for timeframe in timeframes:
+            source = raw / f"{symbol}_{timeframe.value}.tsv"
+            print(f"loading cached {timeframe.value}: {source}", flush=True)
+            dataset = ExnessCsvLoader(
+                symbol=symbol,
+                timeframe=timeframe,
+                strict=True,
+                closure_calendar=calendar,
+            ).load(source)
             datasets.append(dataset)
             print(
                 f"validated {timeframe.value}: bars={len(dataset.records)} "
@@ -136,8 +147,40 @@ def main() -> None:
                 f"unexplained={dataset.quality.unexplained_gap_count}",
                 flush=True,
             )
-    finally:
-        client.close()
+    else:
+        load_env_file(args.env_file)
+        config = MT5ConnectionConfig.from_environment()
+        if config.symbol != symbol:
+            raise ValueError("MT5 environment symbol does not match --symbol")
+        client = MT5HistoryClient(config)
+        client.connect()
+        try:
+            captured_at = datetime.now(UTC)
+            metadata = client.symbol_metadata(captured_at=captured_at)
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text(
+                metadata.model_dump_json(indent=2), encoding="utf-8"
+            )
+            for timeframe in timeframes:
+                print(f"fetching {timeframe.value}", flush=True)
+                dataset = client.fetch_dataset(
+                    MT5HistoryRequest(
+                        timeframe=timeframe,
+                        start_at=replay_start,
+                        end_at=analysis_end,
+                    ),
+                    closure_calendar=calendar,
+                    raw_output_path=raw / f"{symbol}_{timeframe.value}.tsv",
+                )
+                datasets.append(dataset)
+                print(
+                    f"validated {timeframe.value}: bars={len(dataset.records)} "
+                    f"gaps={len(dataset.quality.gaps)} "
+                    f"unexplained={dataset.quality.unexplained_gap_count}",
+                    flush=True,
+                )
+        finally:
+            client.close()
 
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -154,7 +197,7 @@ def main() -> None:
         )
     )
     engine = M4ReplayEngine(
-        symbol=config.symbol,
+        symbol=symbol,
         symbol_metadata=metadata,
         git_commit_sha=revision,
         candle_config=CandleFeatureConfig(baseline_period=20),
