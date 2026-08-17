@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -34,7 +34,7 @@ class OHLCBar(SchemaModel):
     is_closed: bool = True
 
     @model_validator(mode="after")
-    def validate_bar(self) -> "OHLCBar":
+    def validate_bar(self) -> OHLCBar:
         if self.close_time <= self.open_time:
             raise ValueError("close_time must be after open_time")
         if self.high < max(self.open, self.close):
@@ -65,7 +65,7 @@ class MarketClosure(SchemaModel):
     reason: NonEmptyStr
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "MarketClosure":
+    def validate_interval(self) -> MarketClosure:
         if self.end_at <= self.start_at:
             raise ValueError("market closure end must be after start")
         return self
@@ -76,6 +76,7 @@ class ExplicitClosureCalendar(SchemaModel):
 
     calendar_id: NonEmptyStr
     closures: list[MarketClosure] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def covers_gap(self, start_at: AwareDatetime, end_at: AwareDatetime) -> bool:
         if end_at <= start_at:

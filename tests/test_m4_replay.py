@@ -15,9 +15,26 @@ from ict_trading_agent.m4 import (
     M4EventKind,
     M4ReplayEngine,
 )
+from ict_trading_agent.m4_support import M4StudyWindow, M4SymbolMetadata
 from ict_trading_agent.market import OHLCBar
 
 T0 = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+
+
+def engine_identity() -> dict[str, object]:
+    return {
+        "symbol_metadata": M4SymbolMetadata(
+            symbol="XAUUSD", digits=2, point=0.01, trade_tick_size=0.1
+        ),
+        "git_commit_sha": "test-revision",
+    }
+
+
+def study() -> M4StudyWindow:
+    return M4StudyWindow(
+        replay_start=T0,
+        analysis_start=T0 + timedelta(seconds=1),
+    )
 
 
 def bar(
@@ -87,19 +104,9 @@ def ready_bars() -> list[OHLCBar]:
 
 
 def test_exness_mt5_loader_preserves_utc_spread_and_reports_quality() -> None:
-    header = "\t".join(
-        [
-            "<DATE>",
-            "<TIME>",
-            "<OPEN>",
-            "<HIGH>",
-            "<LOW>",
-            "<CLOSE>",
-            "<TICKVOL>",
-            "<VOL>",
-            "<SPREAD>",
-            "<BID_SOURCE>",
-        ]
+    header = (
+        "<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t"
+        "<VOL>\t<SPREAD>\t<BID_SOURCE>"
     )
     text = (
         header
@@ -149,7 +156,7 @@ def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> 
     bars = ready_bars()
     engine = M4ReplayEngine(
         symbol="XAUUSD",
-        tick_size=0.1,
+        **engine_identity(),
         initial_facts=[
             reference(
                 "pdl-100", FactType.PREVIOUS_DAY_LEVEL, Timeframe.D1, "low", 100.0
@@ -160,7 +167,10 @@ def test_m4_replay_runs_production_path_and_exports_audit_datasets(tmp_path) -> 
         m3_policy=M3Policy(setup_timeframes=(Timeframe.M5,)),
     )
 
-    result = engine.run([record(item, index + 2) for index, item in enumerate(bars)])
+    result = engine.run(
+        [record(item, index + 2) for index, item in enumerate(bars)],
+        study_window=study(),
+    )
 
     assert result.summary.bars == 7
     assert result.summary.liquidity_raids == 1
@@ -202,7 +212,7 @@ def test_m4_replay_keeps_late_reclaim_as_near_miss() -> None:
     ]
     engine = M4ReplayEngine(
         symbol="XAUUSD",
-        tick_size=0.1,
+        **engine_identity(),
         initial_facts=[
             reference(
                 "pdl-100", FactType.PREVIOUS_DAY_LEVEL, Timeframe.D1, "low", 100.0
@@ -212,7 +222,10 @@ def test_m4_replay_keeps_late_reclaim_as_near_miss() -> None:
         m3_policy=M3Policy(setup_timeframes=(Timeframe.M5,)),
     )
 
-    result = engine.run([record(item, index + 2) for index, item in enumerate(bars)])
+    result = engine.run(
+        [record(item, index + 2) for index, item in enumerate(bars)],
+        study_window=study(),
+    )
 
     late = [
         item
@@ -238,7 +251,7 @@ def test_m4_replay_audits_expiry_and_late_shift_without_reopening_setup() -> Non
     )
     engine = M4ReplayEngine(
         symbol="XAUUSD",
-        tick_size=0.1,
+        **engine_identity(),
         initial_facts=[
             reference(
                 "pdl-100", FactType.PREVIOUS_DAY_LEVEL, Timeframe.D1, "low", 100.0
@@ -249,7 +262,10 @@ def test_m4_replay_audits_expiry_and_late_shift_without_reopening_setup() -> Non
         m3_policy=policy,
     )
 
-    result = engine.run([record(item, index + 2) for index, item in enumerate(bars)])
+    result = engine.run(
+        [record(item, index + 2) for index, item in enumerate(bars)],
+        study_window=study(),
+    )
 
     assert result.summary.expired_setups == 1
     assert result.summary.late_shifts == 1
@@ -280,7 +296,7 @@ def test_same_close_processes_lower_timeframe_before_higher_timeframe() -> None:
     ]
     engine = M4ReplayEngine(
         symbol="XAUUSD",
-        tick_size=0.1,
+        **engine_identity(),
         candle_config=CandleFeatureConfig(baseline_period=1),
     )
 
@@ -288,7 +304,8 @@ def test_same_close_processes_lower_timeframe_before_higher_timeframe() -> None:
         [
             *(record(item, index + 2) for index, item in enumerate(m5)),
             *(record(item, index + 100) for index, item in enumerate(m15)),
-        ]
+        ],
+        study_window=study(),
     )
 
     shared_close = T0 + timedelta(hours=1)

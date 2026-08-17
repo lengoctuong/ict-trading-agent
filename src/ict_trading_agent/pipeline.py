@@ -43,6 +43,8 @@ class M2DetectionBatch(SchemaModel):
 class M2PrimitivePipeline:
     """Closed-bar M2 vertical slice with append-only point-in-time outputs."""
 
+    version = "0.1.0"
+
     def __init__(
         self,
         *,

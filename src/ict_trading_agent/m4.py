@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 from enum import Enum
 from hashlib import sha256
 from io import StringIO
-from itertools import groupby
+from itertools import groupby, pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -21,11 +21,20 @@ from .enums import CandidateType, Direction, FactType, SetupStatus, Timeframe
 from .facts import ObservableFact
 from .lifecycle import SetupTransition
 from .m3 import M3DetectionBatch, M3Policy, M3SetupPipeline, ReadyForLLMPayload
+from .m4_support import (
+    CausalReferenceBuilder,
+    M4ExperimentManifest,
+    M4SourceFingerprint,
+    M4StudyWindow,
+    M4SymbolMetadata,
+    TemporalContextProvider,
+)
 from .market import (
     TIMEFRAME_DURATIONS,
     BarAdjacencyPolicy,
     ClosedBarFeed,
     ExplicitClosureCalendar,
+    MarketSequenceAdjacencyPolicy,
     OHLCBar,
 )
 from .pipeline import M2DetectionBatch, M2PrimitivePipeline
@@ -114,6 +123,7 @@ class ExnessDataset(SchemaModel):
     symbol: NonEmptyStr
     records: list[ExnessBarRecord]
     quality: DataQualityReport
+    content_sha256: NonEmptyStr
 
     @model_validator(mode="after")
     def validate_dataset(self) -> ExnessDataset:
@@ -157,10 +167,10 @@ def _parse_timestamp(row: Mapping[str, str]) -> datetime:
     parsed: datetime | None = None
     for parser in (
         datetime.fromisoformat,
-        lambda item: datetime.strptime(item, "%Y.%m.%d %H:%M:%S"),
-        lambda item: datetime.strptime(item, "%Y-%m-%d %H:%M:%S"),
-        lambda item: datetime.strptime(item, "%Y.%m.%d %H:%M"),
-        lambda item: datetime.strptime(item, "%Y-%m-%d %H:%M"),
+        lambda item: datetime.strptime(item, "%Y.%m.%d %H:%M:%S").replace(tzinfo=UTC),
+        lambda item: datetime.strptime(item, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC),
+        lambda item: datetime.strptime(item, "%Y.%m.%d %H:%M").replace(tzinfo=UTC),
+        lambda item: datetime.strptime(item, "%Y-%m-%d %H:%M").replace(tzinfo=UTC),
     ):
         try:
             parsed = parser(raw.replace("Z", "+00:00"))
@@ -349,7 +359,7 @@ class ExnessCsvLoader:
             by_timeframe[record.bar.timeframe].append(record)
         for timeframe, items in by_timeframe.items():
             duration = TIMEFRAME_DURATIONS[timeframe]
-            for left, right in zip(items, items[1:], strict=False):
+            for left, right in pairwise(items):
                 if right.bar.open_time <= left.bar.open_time + duration:
                     continue
                 missing = int((right.bar.open_time - left.bar.close_time) / duration)
@@ -394,7 +404,12 @@ class ExnessCsvLoader:
         )
         if self.strict and report.has_errors:
             raise DataQualityError("Exness CSV failed strict data validation", report)
-        return ExnessDataset(symbol=self.symbol, records=records, quality=report)
+        return ExnessDataset(
+            symbol=self.symbol,
+            records=records,
+            quality=report,
+            content_sha256=sha256(text.encode("utf-8")).hexdigest(),
+        )
 
 
 class M4AuditEvent(SchemaModel):
@@ -410,6 +425,9 @@ class M4AuditEvent(SchemaModel):
     setup_candidate_id: str | None = None
     raid_episode_id: str | None = None
     reason_codes: list[str] = Field(default_factory=list)
+    study_phase: str = "analysis"
+    included_in_analysis: bool = True
+    temporal_context: dict[str, Any] = Field(default_factory=dict)
     payload: dict[str, Any]
 
 
@@ -425,11 +443,14 @@ class M4NearMiss(SchemaModel):
     distance_bars: int | None = Field(default=None, ge=0)
     threshold_bars: int | None = Field(default=None, ge=0)
     excess_bars: int | None = Field(default=None, ge=0)
+    study_phase: str = "analysis"
+    included_in_analysis: bool = True
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class M4ReplayStep(SchemaModel):
     as_of: AwareDatetime
+    study_phase: str = "analysis"
     processed_timeframes: list[Timeframe]
     event_ids: list[NonEmptyStr]
 
@@ -462,6 +483,8 @@ class M4ReplayResult(SchemaModel):
     symbol: NonEmptyStr
     started_at: AwareDatetime
     completed_at: AwareDatetime
+    study_window: M4StudyWindow
+    manifest: M4ExperimentManifest
     events: list[M4AuditEvent]
     near_misses: list[M4NearMiss]
     steps: list[M4ReplayStep]
@@ -497,6 +520,7 @@ class M4ReplayResult(SchemaModel):
             "steps": output / "replay_steps.jsonl",
             "summary": output / "summary.json",
             "data_quality": output / "data_quality.json",
+            "manifest": output / "manifest.json",
         }
         for key, items in (
             ("events", self.events),
@@ -517,6 +541,9 @@ class M4ReplayResult(SchemaModel):
                 indent=2,
             ),
             encoding="utf-8",
+        )
+        paths["manifest"].write_text(
+            self.manifest.model_dump_json(indent=2), encoding="utf-8"
         )
         return paths
 
@@ -793,6 +820,8 @@ class _AuditCollector:
                         distance_bars=distance,
                         threshold_bars=threshold,
                         excess_bars=excess,
+                        study_phase=event.study_phase,
+                        included_in_analysis=event.included_in_analysis,
                         payload=event.payload,
                     )
                 )
@@ -947,8 +976,8 @@ def _summary(
 class M4ReplayEngine:
     """Append bars at their close and run the production M2/M3 path once."""
 
-    version = "0.1.0"
-    _timeframe_priority = {
+    version = "0.1.1"
+    _timeframe_priority: ClassVar[dict[Timeframe, int]] = {
         Timeframe.M1: 0,
         Timeframe.M5: 1,
         Timeframe.M15: 2,
@@ -962,7 +991,8 @@ class M4ReplayEngine:
         self,
         *,
         symbol: str,
-        tick_size: float,
+        symbol_metadata: M4SymbolMetadata,
+        git_commit_sha: str,
         initial_facts: Sequence[ObservableFact] = (),
         target_candidates: Sequence[TargetCandidate] = (),
         context: Mapping[str, Any] | None = None,
@@ -971,8 +1001,26 @@ class M4ReplayEngine:
         m3_policy: M3Policy | None = None,
         adjacency_policy: BarAdjacencyPolicy | None = None,
         reference_lifecycle_policy: ReferenceLifecyclePolicy | None = None,
+        context_provider: TemporalContextProvider | None = None,
+        reference_builder: CausalReferenceBuilder | None = None,
     ) -> None:
+        if symbol_metadata.symbol != symbol:
+            raise ValueError("symbol metadata must match the replay symbol")
+        if not git_commit_sha.strip():
+            raise ValueError("git_commit_sha is required for a reproducible replay")
         self.symbol = symbol
+        self.symbol_metadata = symbol_metadata.model_copy(deep=True)
+        self.git_commit_sha = git_commit_sha.strip()
+        self.context_provider = context_provider
+        self.reference_builder = reference_builder or CausalReferenceBuilder()
+        self.base_context = dict(context or {})
+        self.adjacency_policy = adjacency_policy
+        self.reference_lifecycle_policy = (
+            reference_lifecycle_policy or ReferenceLifecyclePolicy()
+        )
+        self.target_candidates = tuple(
+            item.model_copy(deep=True) for item in target_candidates
+        )
         self.initial_facts = tuple(item.model_copy(deep=True) for item in initial_facts)
         self.feed = ClosedBarFeed(symbol)
         self.facts = FactStore()
@@ -985,11 +1033,11 @@ class M4ReplayEngine:
             bar_feed=self.feed,
             fact_store=self.facts,
             candidate_store=self.candidates,
-            tick_size=tick_size,
+            tick_size=self.symbol_metadata.trade_tick_size,
             candle_config=candle_config,
             displacement_thresholds=displacement_thresholds,
             adjacency_policy=adjacency_policy,
-            reference_lifecycle_policy=reference_lifecycle_policy,
+            reference_lifecycle_policy=self.reference_lifecycle_policy,
         )
         self.m3 = M3SetupPipeline(
             bar_feed=self.feed,
@@ -997,40 +1045,67 @@ class M4ReplayEngine:
             candidate_store=self.candidates,
             setup_store=self.setups,
             raid_store=self.raids,
-            tick_size=tick_size,
+            tick_size=self.symbol_metadata.trade_tick_size,
             policy=self.policy,
             target_candidates=target_candidates,
-            context=context,
+            context=self.base_context,
         )
         self._has_run = False
 
     def run(
         self,
         inputs: Sequence[ExnessDataset | ExnessBarRecord | OHLCBar],
+        *,
+        study_window: M4StudyWindow,
     ) -> M4ReplayResult:
         if self._has_run:
             raise ValueError("M4ReplayEngine instances are single-run")
         self._has_run = True
         records: list[ExnessBarRecord] = []
+        direct_records: list[ExnessBarRecord] = []
         quality: list[DataQualityReport] = []
+        datasets: list[ExnessDataset] = []
         for item in inputs:
             if isinstance(item, ExnessDataset):
+                datasets.append(item)
                 records.extend(item.records)
                 quality.append(item.quality)
             elif isinstance(item, ExnessBarRecord):
                 records.append(item)
+                direct_records.append(item)
             else:
-                records.append(
-                    ExnessBarRecord(
-                        bar=item,
-                        source_name="direct",
-                        source_row_number=2,
-                    )
+                direct = ExnessBarRecord(
+                    bar=item,
+                    source_name="direct",
+                    source_row_number=2,
                 )
+                records.append(direct)
+                direct_records.append(direct)
         if not records:
             raise ValueError("M4 replay requires at least one closed bar")
         if any(item.bar.symbol != self.symbol for item in records):
             raise ValueError("all replay bars must match the engine symbol")
+        records = [
+            item
+            for item in records
+            if item.bar.open_time >= study_window.replay_start
+            and (
+                study_window.analysis_end is None
+                or item.bar.close_time <= study_window.analysis_end
+            )
+        ]
+        included_keys = {(item.bar.timeframe, item.bar.open_time) for item in records}
+        direct_records = [
+            item
+            for item in direct_records
+            if (item.bar.timeframe, item.bar.open_time) in included_keys
+        ]
+        if not records:
+            raise ValueError("study window excludes every replay bar")
+        if min(item.bar.open_time for item in records) > study_window.replay_start:
+            raise ValueError("source data does not cover replay_start")
+        if max(item.bar.close_time for item in records) < study_window.analysis_start:
+            raise ValueError("source data does not reach analysis_start")
         keys = [(item.bar.timeframe, item.bar.open_time) for item in records]
         if len(keys) != len(set(keys)):
             raise ValueError("replay input contains duplicate timeframe/open_time")
@@ -1057,6 +1132,10 @@ class M4ReplayEngine:
             for record in current:
                 self.feed.append(record.bar, observed_at=as_of)
                 collector.add_bar(record)
+                reference_facts = self.reference_builder.ingest(record.bar)
+                self.facts.extend(reference_facts)
+                for fact in reference_facts:
+                    collector._add_fact(fact)
             processed: list[Timeframe] = []
             for record in current:
                 timeframe = record.bar.timeframe
@@ -1065,6 +1144,10 @@ class M4ReplayEngine:
                 m2_batch = self.m2.process_latest(timeframe=timeframe, as_of=as_of)
                 collector.add_m2(m2_batch)
                 if timeframe in supported_m3:
+                    if self.context_provider is not None:
+                        self.m3.context = (
+                            self.base_context | self.context_provider.context_at(as_of)
+                        )
                     m3_batch = self.m3.process_latest(timeframe=timeframe, as_of=as_of)
                     collector.add_m3(m3_batch)
                 processed.append(timeframe)
@@ -1076,32 +1159,152 @@ class M4ReplayEngine:
             steps.append(
                 M4ReplayStep(
                     as_of=as_of,
+                    study_phase=study_window.phase_at(as_of),
                     processed_timeframes=processed,
                     event_ids=event_ids,
                 )
             )
-        events = collector.ordered()
-        misses = collector.near_misses()
-        final_setups = self.setups.visible(as_of=completed_at, symbol=self.symbol)
-        fingerprint = {
-            "symbol": self.symbol,
-            "policy": self.policy.model_dump(mode="json"),
-            "initial_facts": [
-                item.model_dump(mode="json") for item in self.initial_facts
-            ],
-            "records": [item.model_dump(mode="json") for item in records],
+        raw_events = collector.ordered()
+        setup_origins = {
+            item.setup_candidate_id: item.available_at
+            for item in raw_events
+            if item.kind == M4EventKind.SETUP and item.setup_candidate_id is not None
         }
-        run_hash = sha256(
-            json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()[:24]
+        events: list[M4AuditEvent] = []
+        for item in raw_events:
+            phase = study_window.phase_at(item.available_at)
+            setup_origin = setup_origins.get(item.setup_candidate_id)
+            included = phase == "analysis" and (
+                setup_origin is None
+                or study_window.phase_at(setup_origin) == "analysis"
+            )
+            temporal = (
+                self.context_provider.context_at(item.available_at)
+                if self.context_provider is not None
+                else {}
+            )
+            events.append(
+                item.model_copy(
+                    update={
+                        "study_phase": phase,
+                        "included_in_analysis": included,
+                        "temporal_context": temporal,
+                    }
+                )
+            )
+        event_map = {item.event_id: item for item in events}
+        misses = [
+            item.model_copy(
+                update={
+                    "study_phase": event_map[item.source_event_id].study_phase,
+                    "included_in_analysis": event_map[
+                        item.source_event_id
+                    ].included_in_analysis,
+                }
+            )
+            for item in collector.near_misses()
+        ]
+        final_setups = self.setups.visible(as_of=completed_at, symbol=self.symbol)
+        eligible_setup_ids = {
+            item.setup_candidate_id
+            for item in events
+            if item.kind == M4EventKind.SETUP and item.included_in_analysis
+        }
+        final_setups = [
+            item
+            for item in final_setups
+            if item.setup_candidate_id in eligible_setup_ids
+        ]
+        source_data = _source_fingerprints(datasets, direct_records)
+        manifest = M4ExperimentManifest(
+            git_commit_sha=self.git_commit_sha,
+            m2_version=self.m2.version,
+            m3_version=self.m3.version,
+            m4_version=self.version,
+            symbol_metadata=self.symbol_metadata,
+            study_window=study_window,
+            source_data=source_data,
+            candle_config=self.m2.candle_features.config.model_dump(mode="json"),
+            displacement_config=self.m2.displacement.thresholds.model_dump(mode="json"),
+            m3_policy=self.policy.model_dump(mode="json"),
+            adjacency_calendar_policy=_adjacency_manifest(self.adjacency_policy),
+            reference_policy={
+                "lifecycle": self.reference_lifecycle_policy.model_dump(mode="json"),
+                "builder": self.reference_builder.manifest(),
+                "initial_facts": [
+                    item.model_dump(mode="json") for item in self.initial_facts
+                ],
+            },
+            context_policy=(
+                self.context_provider.manifest()
+                if self.context_provider is not None
+                else {"provider": "static", "context": self.base_context}
+            ),
+            target_policy={
+                "kind": "explicit_candidates",
+                "targets": [
+                    item.model_dump(mode="json") for item in self.target_candidates
+                ],
+            },
+        )
+        run_hash = manifest.fingerprint()[:24]
+        analysis_events = [item for item in events if item.included_in_analysis]
+        analysis_misses = [item for item in misses if item.included_in_analysis]
         return M4ReplayResult(
             run_id=f"m4-replay-{run_hash}",
             symbol=self.symbol,
             started_at=min(item.bar.open_time for item in records),
             completed_at=completed_at,
+            study_window=study_window,
+            manifest=manifest,
             events=events,
             near_misses=misses,
             steps=steps,
             data_quality=quality,
-            summary=_summary(events, misses, final_setups),
+            summary=_summary(analysis_events, analysis_misses, final_setups),
         )
+
+
+def _source_fingerprints(
+    datasets: Sequence[ExnessDataset], direct_records: Sequence[ExnessBarRecord]
+) -> list[M4SourceFingerprint]:
+    fingerprints = [
+        M4SourceFingerprint(
+            source_name=item.quality.source_name,
+            content_sha256=item.content_sha256,
+            rows=len(item.records),
+            timeframes=sorted(
+                {record.bar.timeframe for record in item.records},
+                key=lambda value: value.value,
+            ),
+        )
+        for item in datasets
+    ]
+    if not direct_records:
+        return fingerprints
+    payload = json.dumps(
+        [item.model_dump(mode="json") for item in direct_records],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fingerprints.append(
+        M4SourceFingerprint(
+            source_name="direct",
+            content_sha256=sha256(payload.encode()).hexdigest(),
+            rows=len(direct_records),
+            timeframes=sorted(
+                {item.bar.timeframe for item in direct_records},
+                key=lambda value: value.value,
+            ),
+        )
+    )
+    return fingerprints
+
+
+def _adjacency_manifest(policy: BarAdjacencyPolicy | None) -> dict[str, Any]:
+    if policy is None:
+        return {"policy": "WallClockAdjacencyPolicy"}
+    payload: dict[str, Any] = {"policy": type(policy).__name__}
+    if isinstance(policy, MarketSequenceAdjacencyPolicy):
+        payload["calendar"] = policy.calendar.model_dump(mode="json")
+    return payload

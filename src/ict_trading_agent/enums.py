@@ -87,6 +87,7 @@ class FactType(str, Enum):
     CANDLE_FEATURES = "candle_features"
     SESSION_LEVEL = "session_level"
     PREVIOUS_DAY_LEVEL = "previous_day_level"
+    TRUE_DAY_OPEN = "true_day_open"
     REFERENCE_STATE = "reference_state"
     STRUCTURE_STATE = "structure_state"
     FVG_REACTION = "fvg_reaction"
