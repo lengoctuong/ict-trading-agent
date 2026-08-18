@@ -20,10 +20,10 @@ def test_setup_review_renders_ict_geometry(tmp_path: Path) -> None:
     }) + "\n", encoding="utf-8")
     events = tmp_path / "events.jsonl"
     values = [
-        {"kind":"candidate", "record_id":"raid", "category":"liquidity_event", "setup_candidate_id":setup_id, "available_at":"2026-08-10T05:35:00+00:00", "payload":{"raw_features":{"reference_price":99,"extreme":98}}},
-        {"kind":"candidate", "record_id":"shift", "category":"shift", "setup_candidate_id":setup_id, "available_at":"2026-08-10T05:40:00+00:00", "payload":{}},
-        {"kind":"candidate", "record_id":"break", "category":"structure_break", "setup_candidate_id":setup_id, "payload":{"raw_features":{"reference_price":104}}},
-        {"kind":"candidate", "record_id":"fvg", "category":"fvg", "setup_candidate_id":setup_id, "payload":{"raw_features":{"low":101,"high":102,"ce":101.5}}},
+        {"kind":"candidate", "record_id":"raid", "category":"liquidity_event", "available_at":"2026-08-10T05:35:00+00:00", "payload":{"raw_features":{"reference_price":99,"extreme":98}}},
+        {"kind":"candidate", "record_id":"shift", "category":"shift", "available_at":"2026-08-10T05:40:00+00:00", "payload":{}},
+        {"kind":"candidate", "record_id":"break", "category":"structure_break", "payload":{"raw_features":{"reference_price":104}}},
+        {"kind":"candidate", "record_id":"fvg", "category":"fvg", "payload":{"raw_features":{"low":101,"high":102,"ce":101.5}}},
         {"kind":"transition", "category":"forming", "setup_candidate_id":setup_id, "payload":{"hard_invalidation_price":98}},
     ]
     events.write_text("".join(json.dumps(value) + "\n" for value in values), encoding="utf-8")

@@ -384,3 +384,13 @@ gian/cấu trúc nến.
 `READY_FOR_LLM` vẫn là audit payload đầy đủ (candidate/fact IDs), **không phải
 prompt LLM cuối**. Một compact market-state handoff được mở thành Open Question
 10 trước khi cho external LLM gọi thật.
+
+### HTML review context and batch export — 2026-08-19
+
+Review HTML now reads raw Exness M5 rather than relying only on the short queue
+window: default context is 72 bars before and 96 bars after READY. It resolves
+candidate records through the setup's evidence IDs because physical swing/raid
+candidates causally precede the setup and do not themselves carry its setup ID.
+The chart marks both the actual liquidity-swing candle and the actual
+swing-broken-by-SHIFT candle. `--all` renders the full deterministic 50-item
+chart queue plus `setup_reviews/index.html`.

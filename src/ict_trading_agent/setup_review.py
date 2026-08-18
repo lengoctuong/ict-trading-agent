@@ -7,10 +7,11 @@ the Exness feed that produced the detector evidence.
 
 from __future__ import annotations
 
+import csv
 import html
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,30 +40,106 @@ class SetupReview:
 
 
 def load_setup_review(
-    chart_queue_path: Path, audit_events_path: Path, setup_id: str
+    chart_queue_path: Path,
+    audit_events_path: Path,
+    setup_id: str,
+    *,
+    m5_tsv_path: Path | None = None,
+    bars_before: int = 72,
+    bars_after: int = 96,
 ) -> SetupReview:
-    """Load a visual review, retaining only machine-observable evidence."""
+    """Load one visual review with optional wider raw-M5 context."""
 
-    item = _queue_item(chart_queue_path, setup_id)
+    reviews = load_setup_reviews(
+        chart_queue_path,
+        audit_events_path,
+        setup_ids=(setup_id,),
+        m5_tsv_path=m5_tsv_path,
+        bars_before=bars_before,
+        bars_after=bars_after,
+    )
+    if not reviews:
+        raise ValueError(f"setup {setup_id} is not in chart review queue")
+    return reviews[0]
+
+
+def load_setup_reviews(
+    chart_queue_path: Path,
+    audit_events_path: Path,
+    *,
+    setup_ids: tuple[str, ...] | None = None,
+    m5_tsv_path: Path | None = None,
+    bars_before: int = 72,
+    bars_after: int = 96,
+) -> tuple[SetupReview, ...]:
+    """Load a batch efficiently: audit/raw sources are each parsed once."""
+
+    wanted = set(setup_ids) if setup_ids else None
+    items = [
+        item
+        for item in _queue_items(chart_queue_path)
+        if wanted is None or item.get("setup_candidate_id") in wanted
+    ]
     all_events = _events(audit_events_path)
-    events = [event for event in all_events if event.get("setup_candidate_id") == setup_id]
     events_by_id = {event.get("record_id"): event for event in all_events}
+    events_by_setup: dict[str, list[dict[str, Any]]] = {}
+    for event in all_events:
+        if setup_key := event.get("setup_candidate_id"):
+            events_by_setup.setdefault(str(setup_key), []).append(event)
+    raw_bars = _m5_bars(m5_tsv_path) if m5_tsv_path else ()
+    return tuple(
+        _review_from_item(
+            item,
+            events_by_setup.get(str(item["setup_candidate_id"]), []),
+            events_by_id,
+            _context_bars(raw_bars, _timestamp(str(item["as_of"])), bars_before, bars_after)
+            if raw_bars
+            else tuple(item["window_bars"]),
+        )
+        for item in items
+    )
+
+
+def _review_from_item(
+    item: dict[str, Any],
+    events: list[dict[str, Any]],
+    events_by_id: dict[str | None, dict[str, Any]],
+    bars: tuple[dict[str, Any], ...],
+) -> SetupReview:
+    """Materialize one review from its queue item and causal audit evidence."""
+
+    setup_id = str(item["setup_candidate_id"])
+    # Candidate facts normally predate and therefore do not carry the later
+    # setup ID. The READY evidence list is the causal join, not that field.
     candidates = {
-        event["record_id"]: event
-        for event in events
-        if event.get("kind") == "candidate"
+        str(record_id): event
+        for record_id, event in events_by_id.items()
+        if record_id is not None and event.get("kind") == "candidate"
     }
     evidence = item["evidence_payload"]["setup"]
     candidate_ids = tuple(evidence.get("evidence_candidate_ids", ()))
-    by_category = {
-        str(event.get("category")): event
+    linked_candidates = tuple(
+        candidates[candidate_id]
         for candidate_id in candidate_ids
-        if (event := candidates.get(candidate_id)) is not None
-    }
-    raid = by_category.get("liquidity_event")
-    shift = by_category.get("shift")
-    structure = by_category.get("structure_break")
-    fvg = by_category.get("fvg")
+        if candidate_id in candidates
+    )
+
+    def candidate(category: str) -> dict[str, Any] | None:
+        return next(
+            (
+                event
+                for event in linked_candidates
+                if event.get("category") == category
+            ),
+            None,
+        )
+
+    # Candidate order is causal. In particular, a later M15 observation of an
+    # M5 raid must not overwrite the physical M5 sweep for chart geometry.
+    raid = candidate("liquidity_event")
+    shift = candidate("shift")
+    structure = candidate("structure_break")
+    fvg = candidate("fvg")
     raid_features = _features(raid)
     structure_features = _features(structure)
     fvg_features = _features(fvg)
@@ -83,7 +160,7 @@ def load_setup_review(
         direction=str(item["direction"]),
         setup_timeframe=str(item["timeframe"]),
         ready_at=_timestamp(str(item["as_of"])),
-        bars=tuple(item["window_bars"]),
+        bars=bars,
         liquidity_level=_number(raid_features.get("reference_price")),
         raid_extreme=_number(raid_features.get("extreme")),
         shift_level=_number(structure_features.get("reference_price")),
@@ -144,6 +221,14 @@ def render_setup_review(review: SetupReview) -> str:
                 return index
         return None
 
+    def index_by_open(moment: datetime | None) -> int | None:
+        if moment is None:
+            return None
+        for index, bar in enumerate(review.bars):
+            if _timestamp(str(bar["open_time"])) == moment:
+                return index
+        return None
+
     grid = []
     for row in range(6):
         price = low + (high - low) * row / 5
@@ -183,9 +268,8 @@ def render_setup_review(review: SetupReview) -> str:
     level(review.fvg_ce, "FVG CE", "#38bdf8")
     level(review.invalidation, "Invalidation", "#fb7185", "2 3")
     markers = []
+    swing_points = []
     for marker_number, (moment, label, color) in enumerate((
-        (review.liquidity_swing_at, "Swing low/high", "#f59e0b"),
-        (review.shift_swing_at, "Swing broken by shift", "#a78bfa"),
         (review.raid_at, "RAID confirmed", "#f59e0b"),
         (review.shift_at, "SHIFT confirmed", "#a78bfa"),
         (review.ready_at, "READY for LLM", "#22c55e"),
@@ -197,6 +281,16 @@ def render_setup_review(review: SetupReview) -> str:
         markers.append(f'<line x1="{px:.1f}" y1="{top}" x2="{px:.1f}" y2="{top + plot_height}" stroke="{color}" stroke-dasharray="3 4"/>')
         marker_y = top + 16 + (marker_number % 3) * 16
         markers.append(f'<text x="{px + 4:.1f}" y="{marker_y}" fill="{color}" class="label">{label}</text>')
+    for moment, price, label, color in (
+        (review.liquidity_swing_at, review.liquidity_level, "swing swept", "#f59e0b"),
+        (review.shift_swing_at, review.shift_level, "swing broken", "#a78bfa"),
+    ):
+        index = index_by_open(moment)
+        if index is None or price is None:
+            continue
+        px, py = x(index), y(price)
+        swing_points.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="5" fill="#0b1220" stroke="{color}" stroke-width="2"/>')
+        swing_points.append(f'<text x="{px + 7:.1f}" y="{py - 7:.1f}" fill="{color}" class="label">{label}</text>')
     time_labels = []
     step = max(1, count // 8)
     for index in range(0, count, step):
@@ -223,25 +317,57 @@ def render_setup_review(review: SetupReview) -> str:
 <html lang="vi"><head><meta charset="utf-8"><title>ICT review {html.escape(review.setup_id)}</title>
 <style>body{{margin:0;background:#0b1220;color:#e5e7eb;font:14px system-ui,sans-serif}}main{{max-width:1280px;margin:auto;padding:22px}}h1{{font-size:18px;margin:0 0 5px}}.muted,.axis{{fill:#94a3b8;color:#94a3b8}}.grid{{stroke:#1e293b}}.label{{font-size:12px;font-weight:600}}.panel{{background:#111827;border:1px solid #243244;border-radius:8px;padding:12px;margin-top:12px;line-height:1.55}}code{{font-size:11px;word-break:break-all}}</style></head>
 <body><main><h1>ICT chart review — {html.escape(review.setup_id)}</h1><div class="muted">{html.escape(review.symbol)} • exact Exness M5 candles • all times UTC</div>
-<svg viewBox="0 0 {width} {height}" width="100%" role="img" aria-label="ICT setup chart">{''.join(grid)}{''.join(lines)}{''.join(markers)}{''.join(candles)}{''.join(time_labels)}</svg>
+<svg viewBox="0 0 {width} {height}" width="100%" role="img" aria-label="ICT setup chart">{''.join(grid)}{''.join(lines)}{''.join(markers)}{''.join(candles)}{''.join(swing_points)}{''.join(time_labels)}</svg>
 <div class="panel"><strong>Machine narrative</strong><br>{narrative}</div>
 <div class="panel"><strong>Exact machine levels</strong><br>{levels}</div>
 <div class="panel"><strong>Audit references (not prompt text for LLM)</strong><br><code>{ids}</code></div>
 </main></body></html>'''
 
 
-def _queue_item(path: Path, setup_id: str) -> dict[str, Any]:
+def _queue_items(path: Path) -> tuple[dict[str, Any], ...]:
     with path.open(encoding="utf-8") as source:
-        for line in source:
-            item = json.loads(line)
-            if item.get("setup_candidate_id") == setup_id:
-                return item
-    raise ValueError(f"setup {setup_id} is not in chart review queue")
+        return tuple(json.loads(line) for line in source)
 
 
 def _events(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as source:
         return [json.loads(line) for line in source]
+
+
+def _m5_bars(path: Path) -> tuple[dict[str, Any], ...]:
+    with path.open(encoding="utf-8", newline="") as source:
+        rows = csv.DictReader(source, delimiter="\t")
+        return tuple(
+            {
+                "symbol": "source-symbol",
+                "open_time": row["datetime"],
+                "close_time": (
+                    _timestamp(row["datetime"]) + timedelta(minutes=5)
+                ).isoformat(),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            }
+            for row in rows
+        )
+
+
+def _context_bars(
+    bars: tuple[dict[str, Any], ...],
+    as_of: datetime,
+    bars_before: int,
+    bars_after: int,
+) -> tuple[dict[str, Any], ...]:
+    if bars_before < 0 or bars_after < 0:
+        raise ValueError("context bar counts cannot be negative")
+    anchor = max(
+        index
+        for index, bar in enumerate(bars)
+        if _timestamp(str(bar["close_time"])) <= as_of
+    )
+    start = max(0, anchor - bars_before)
+    return bars[start : anchor + bars_after + 1]
 
 
 def _features(event: dict[str, Any] | None) -> dict[str, Any]:
