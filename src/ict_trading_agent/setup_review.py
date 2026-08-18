@@ -249,38 +249,83 @@ def render_setup_review(review: SetupReview) -> str:
             f'<rect x="{px - candle_width / 2:.1f}" y="{body_top:.1f}" width="{candle_width:.1f}" height="{max(1.0, body_bottom - body_top):.1f}" fill="{color}"/>'
         )
     lines = []
-    def level(value: float | None, label: str, color: str, dash: str = "6 4") -> None:
-        if value is None:
+
+    def local_level(
+        value: float | None,
+        label: str | None,
+        color: str,
+        start: int | None,
+        end: int | None,
+        dash: str = "6 4",
+    ) -> None:
+        if value is None or start is None or end is None:
             return
         py = y(value)
+        x1, x2 = x(start) - candle_width, x(end) + candle_width
         lines.append(
-            f'<line x1="{left}" y1="{py:.1f}" x2="{left + plot_width}" y2="{py:.1f}" stroke="{color}" stroke-dasharray="{dash}" stroke-width="1.5"/>'
-            f'<text x="{left + plot_width + 8}" y="{py + 4:.1f}" fill="{color}" class="label">{html.escape(label)} {value:.3f}</text>'
+            f'<line x1="{x1:.1f}" y1="{py:.1f}" x2="{x2:.1f}" y2="{py:.1f}" stroke="{color}" stroke-dasharray="{dash}" stroke-width="1.5"/>'
         )
+        if label:
+            lines.append(
+                f'<text x="{x2 + 6:.1f}" y="{py + 4:.1f}" fill="{color}" class="label">{html.escape(label)} {value:.3f}</text>'
+            )
+    liquidity_swing_index = index_by_open(review.liquidity_swing_at)
+    shift_swing_index = index_by_open(review.shift_swing_at)
+    raid_index = index_at(review.raid_at)
+    shift_index = index_at(review.shift_at)
+    ready_index = index_at(review.ready_at)
     if review.fvg_low is not None and review.fvg_high is not None:
         start = index_at(review.fvg_at) or 0
+        end = ready_index or start
         fvg_y, fvg_height = y(review.fvg_high), y(review.fvg_low) - y(review.fvg_high)
         fvg_x = x(start) - candle_width
-        lines.append(f'<rect x="{fvg_x:.1f}" y="{fvg_y:.1f}" width="{left + plot_width - fvg_x:.1f}" height="{fvg_height:.1f}" fill="#38bdf8" fill-opacity=".18" stroke="#38bdf8"/>')
+        fvg_width = x(end) + candle_width - fvg_x
+        lines.append(f'<rect x="{fvg_x:.1f}" y="{fvg_y:.1f}" width="{fvg_width:.1f}" height="{fvg_height:.1f}" fill="#38bdf8" fill-opacity=".18" stroke="#38bdf8"/>')
         lines.append(f'<text x="{fvg_x + 5:.1f}" y="{fvg_y + 16:.1f}" fill="#7dd3fc" class="label">FVG {review.fvg_low:.3f}–{review.fvg_high:.3f}</text>')
-    level(review.liquidity_level, "Liquidity / swing", "#f59e0b")
-    level(review.shift_level, "Shift break", "#a78bfa")
-    level(review.fvg_ce, "FVG CE", "#38bdf8")
-    level(review.invalidation, "Invalidation", "#fb7185", "2 3")
+    local_level(
+        review.liquidity_level,
+        "swept liquidity",
+        "#f59e0b",
+        liquidity_swing_index,
+        raid_index,
+    )
+    local_level(
+        review.shift_level,
+        "shift break",
+        "#a78bfa",
+        shift_swing_index,
+        shift_index,
+    )
+    local_level(
+        review.fvg_ce,
+        None,
+        "#38bdf8",
+        index_at(review.fvg_at),
+        ready_index,
+    )
+    local_level(
+        review.invalidation,
+        "invalidation",
+        "#fb7185",
+        raid_index,
+        ready_index,
+        "2 3",
+    )
     markers = []
     swing_points = []
     for marker_number, (moment, label, color) in enumerate((
-        (review.raid_at, "RAID confirmed", "#f59e0b"),
-        (review.shift_at, "SHIFT confirmed", "#a78bfa"),
-        (review.ready_at, "READY for LLM", "#22c55e"),
+        (review.raid_at, "RAID", "#f59e0b"),
+        (review.shift_at, "SHIFT", "#a78bfa"),
+        (review.ready_at, "READY", "#22c55e"),
     )):
         index = index_at(moment)
         if index is None:
             continue
         px = x(index)
-        markers.append(f'<line x1="{px:.1f}" y1="{top}" x2="{px:.1f}" y2="{top + plot_height}" stroke="{color}" stroke-dasharray="3 4"/>')
-        marker_y = top + 16 + (marker_number % 3) * 16
-        markers.append(f'<text x="{px + 4:.1f}" y="{marker_y}" fill="{color}" class="label">{label}</text>')
+        candle_high = y(float(review.bars[index]["high"]))
+        marker_y = max(top + 14, candle_high - 12 - marker_number * 14)
+        markers.append(f'<circle cx="{px:.1f}" cy="{candle_high:.1f}" r="3" fill="{color}"/>')
+        markers.append(f'<text x="{px + 5:.1f}" y="{marker_y:.1f}" fill="{color}" class="label">{label}</text>')
     for moment, price, label, color in (
         (review.liquidity_swing_at, review.liquidity_level, "swing swept", "#f59e0b"),
         (review.shift_swing_at, review.shift_level, "swing broken", "#a78bfa"),

@@ -394,3 +394,12 @@ candidates causally precede the setup and do not themselves carry its setup ID.
 The chart marks both the actual liquidity-swing candle and the actual
 swing-broken-by-SHIFT candle. `--all` renders the full deterministic 50-item
 chart queue plus `setup_reviews/index.html`.
+
+### Minimal review annotation pass — 2026-08-19
+
+The first expanded view was visually noisy because every level and lifecycle
+event crossed the entire canvas. The review now keeps only local causal rays:
+liquidity swing → raid, broken swing → SHIFT, and raid → READY/invalidation.
+The FVG box ends at READY. Lifecycle is shown as small candle-adjacent
+`RAID`/`SHIFT`/`READY` markers; no full-height event lines remain. Exact values
+stay in the panel below the chart.

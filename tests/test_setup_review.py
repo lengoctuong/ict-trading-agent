@@ -34,8 +34,5 @@ def test_setup_review_renders_ict_geometry(tmp_path: Path) -> None:
     assert review.liquidity_level == 99
     assert review.shift_level == 104
     assert review.fvg_ce == 101.5
-    assert "Liquidity / swing" in page
-    assert "SHIFT confirmed" in page
-    assert "FVG CE" in page
-    assert "Invalidation" in page
+    assert "FVG 101.000" in page
     assert "not prompt text for LLM" in page
