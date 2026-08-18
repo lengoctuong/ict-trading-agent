@@ -356,3 +356,18 @@ Full-range monitored replay: OPEN
 Không triển khai true streaming collector hoặc redesign evidence ở pass này:
 RAM đã dưới 400 MiB và runtime dưới 30s. Chúng chỉ quay lại nếu full-range
 monitoring chứng minh growth không chấp nhận được.
+
+### TradingView review overlay
+
+Đã thêm generator Pine v6 static từ artifact READY:
+
+```text
+scripts/export_tradingview_ready_overlay.py
+→ tradingview/ready_chart_review.pine  # 50 deterministic chart samples
+→ tradingview/ready_all.pine           # 190 distinct READY payloads
+```
+
+Marker chứa READY timestamp, Exness M5 close available tại timestamp đó,
+direction, setup TF và setup ID. Đây là visual review aid, không phải LLM
+decision hay MT5 entry. Pine không đọc JSONL local trực tiếp, nên regenerate
+overlay sau mỗi replay; dùng M5 chart và feed gần Exness nhất để giảm lệch OHLC.
