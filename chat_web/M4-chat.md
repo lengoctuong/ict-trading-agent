@@ -371,3 +371,16 @@ Marker chứa READY timestamp, Exness M5 close available tại timestamp đó,
 direction, setup TF và setup ID. Đây là visual review aid, không phải LLM
 decision hay MT5 entry. Pine không đọc JSONL local trực tiếp, nên regenerate
 overlay sau mỗi replay; dùng M5 chart và feed gần Exness nhất để giảm lệch OHLC.
+
+### Setup HTML review — 2026-08-19
+
+Pine static chỉ xác định **thời điểm READY**, chưa thể hiện đủ ICT geometry để
+review. Đã bổ sung exporter HTML exact-source: mỗi setup dùng chính cửa sổ nến
+M5 Exness embedded trong M4.2 artifact và vẽ liquidity/swing, raid, swing bị
+close-through (SHIFT), FVG + CE, hard invalidation và READY. Đây là nguồn review
+chính khi TradingView dùng feed khác; TradingView chỉ nên dùng để đối chiếu thời
+gian/cấu trúc nến.
+
+`READY_FOR_LLM` vẫn là audit payload đầy đủ (candidate/fact IDs), **không phải
+prompt LLM cuối**. Một compact market-state handoff được mở thành Open Question
+10 trước khi cho external LLM gọi thật.

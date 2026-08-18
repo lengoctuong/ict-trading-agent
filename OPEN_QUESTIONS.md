@@ -54,6 +54,13 @@ means that design is enforced by code and tests.
    cached warmup + analysis range remains a separately monitored long research
    job before freezing full-range M4.2 artifacts.
 
+10. **LLM handoff materialization — OPEN, required before an external LLM call.**
+    `READY_FOR_LLM` currently retains the complete candidate/fact provenance for
+    audit and replay. Build a compact, versioned market-state summary (raid,
+    broken swing, FVG geometry/reaction, invalidation, targets and a short
+    candle context) for the prompt; retain raw IDs in the audit store rather
+    than sending the whole evidence graph as prompt text.
+
 ## Resolved and implemented
 
 - **M4 performance hardening — IMPLEMENTED for the blocking week gate.** Raid
