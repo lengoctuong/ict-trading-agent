@@ -61,6 +61,17 @@ means that design is enforced by code and tests.
     candle context) for the prompt; retain raw IDs in the audit store rather
     than sending the whole evidence graph as prompt text.
 
+11. **READY thesis versus one entry hypothesis — OPEN, blocking external LLM use.**
+    A `SetupCandidate` currently represents one raid episode plus setup
+    timeframe, so its append-only evidence can contain multiple observations
+    of the same physical raid, multiple simultaneously broken swings, and
+    1–4 linked FVG entry zones. One LLM trade question must instead expose one
+    canonical physical raid, one selected structural break, and one entry-zone
+    hypothesis. Supporting observations remain provenance. If more than one
+    usable FVG exists, fan out separate entry hypotheses or adopt a versioned
+    canonical-zone selection policy; do not present an ambiguous bundle as one
+    entry question.
+
 ## Resolved and implemented
 
 - **M4 performance hardening — IMPLEMENTED for the blocking week gate.** Raid
