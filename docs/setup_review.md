@@ -17,6 +17,17 @@ Render the whole deterministic 50-setup chart-review queue plus an index:
   --all
 ```
 
+Publish planner-readable PNGs to the tracked `docs/setup_reviews/` directory
+after rendering the HTML queue:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_setup_review_pngs.py `
+  --artifact artifacts\m42-bench-metrics3-2026-08-10_2026-08-17
+```
+
+Commit those PNGs and their `README.md`; a ChatGPT web planner cannot access
+the local artifact directory, but can be given their public GitHub URLs.
+
 The output is `setup_reviews/<setup-id>.html` in that artifact. It uses the
 embedded Exness M5 window, rather than a TradingView provider's OHLC values,
 and draws the detector's liquidity/swing level, marks its actual swing candle,

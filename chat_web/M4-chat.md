@@ -403,3 +403,11 @@ liquidity swing → raid, broken swing → SHIFT, and raid → READY/invalidatio
 The FVG box ends at READY. Lifecycle is shown as small candle-adjacent
 `RAID`/`SHIFT`/`READY` markers; no full-height event lines remain. Exact values
 stay in the panel below the chart.
+
+### Public planner-image handoff — 2026-08-19
+
+The local HTML artifact is not visible to ChatGPT web. The full deterministic
+review queue is therefore rendered as 50 committed PNGs in
+`docs/setup_reviews/`, with an adjacent `README.md` gallery index. These are
+the planner-facing review images; the tracked renderer can regenerate them
+from the exact-source HTML after a new artifact run.
